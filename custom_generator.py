@@ -20,7 +20,8 @@ class Send:
     it will have no effect conceptually.
     """
     def __init__(self,ID: str) -> None:
-        if not ID.isalnum(): raise ValueError("ID must be alpha numeric e.g. ID.isalnum() should return True")
+        if not ID.isalnum():
+            raise ValueError("ID must be alpha numeric e.g. ID.isalnum() should return True")
         self.ID=ID
 
     def __repr__(self) -> str:
@@ -81,8 +82,10 @@ def cleaned_source_lines(source: str) -> list[str]:
 
 """
 TODO:
-1. implement exception formmatter
-2. test everything
+1. implement exception formmatter  - format_exception
+2. handle loops e.g. for and while - _create_state
+3. what about yield from           - _create_state
+4. test everything
 """
 class Generator:
     """
@@ -129,10 +132,17 @@ class Generator:
         self.lineno=self.end_lineno
         ## because they're ints we should be fine with this approach to assignment ##
         self.end_lineno=lineno
-        ## extract the code section
+        ## extract the code section ##
         lines=self._source_lines[self.lineno:self.end_lineno]
+        ## replace yield with return ##
+        line=lines[-1]
+        for index,char in enumerate(line):
+            if char!=" ":
+                break
+        if line[index:][:5]=="yield":
+            lines[-1]=line[:index]+"return"+line[index+5:]
+        ## form the state ##
         self.state="\n".join(lines)
-        #####################################################################################################
         if self.state_index: ## assuming it's running
             line=" ".join(lines[0].strip().split()) # .split() followed by .join ensures the spaces are the same
             # as long as it's 'Send(' and Send is Send e.g. locally or globally defined and is correct
@@ -140,7 +150,7 @@ class Generator:
                 self.reciever=collect_string(line[11:])
             else:
                 self.reciever=None
-        # update state position
+        ## update state position ##
         self.state_index+=1
 
     def init_states(self) -> None:
@@ -164,14 +174,15 @@ class Generator:
         ## (getsource does work for lambda expressions but it's got no col_offset which is not useful) ##
         if isinstance(FUNC,str):
             self.source=FUNC
+            self.gi_code=compile(FUNC,"","eval")
         else:
             self.source=getsource(FUNC)
+            self.gi_code=FUNC.__code__
         ## format into lines
         self._source_lines=cleaned_source_lines(self.source)
         # makes all yields returns, handles .send by setting the variable 
         # used to None, and noting what the reciever is each time
         self.init_states()
-        self.gi_code=FUNC.__code__
         self.gi_frame=None
         self.gi_running=False
         self.gi_suspended=False
@@ -191,12 +202,12 @@ class Generator:
         1. change the state
         2. return the value
         """
+        # set the next state and setup the function
+        next(self.state_generator) ## it will raise a StopIteration for us
         # if not set already
         if not self.gi_running:
             self.gi_running=True
             self.gi_suspended=True
-        # set the next state and setup the function
-        next(self.state_generator) ## it will raise a StopIteration for us
         print(repr(self.state))
         code=compile("def next_state(frame: dict):\n\tlocals().update(frame);"+self.state,'','exec')
         FunctionType(code,globals())()
@@ -205,7 +216,7 @@ class Generator:
             self.gi_frame.f_locals,result=next_state(self.gi_frame.f_locals)
         except Exception as e: ## we should format the exception as it normally would be formmated ideally
             raise e
-            #self.format_exception(e)
+            #self._format_exception(e)
         return result
     
     def send(self,arg: Any) -> None:
@@ -219,19 +230,19 @@ class Generator:
     def close(self) -> None:
         """Creates a simple empty generator"""
         self.state_generator=(None for i in ())
-        ## remove the frame??
+        self.gi_frame=None
+        self.gi_running=False
+        self.gi_suspended=False
 
     def throw(self,exception: Exception) -> None:
         """Throws an error at the current line of execution in the function"""
         # get the current position (should be recorded and updated after every execution)
-        self.format_exception(exception)
-    #####################################################################################################
-    ## needs work ----------------------------------------------------------------------- ##
-    def format_exception(self,exception: Exception):
+        self._format_exception(exception)
+
+    def _format_exception(self,exception: Exception):
         """Raises an exception from the last line in the current state e.g. only from what has been"""
-        # not sure how this will work exactly how I want it to ... but I'll think of something
         pass
-    #####################################################################################################
+
     def _copier(self,FUNC: Callable) -> object:
         """copying will create a new generator object but the copier will determine it's depth"""
         attrs=dict(
