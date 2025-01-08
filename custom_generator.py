@@ -1,16 +1,37 @@
+# -*- coding: utf-8 -*- 
 """
 In order to make this module as backwards compatible as possible 
 some of the functions used will be written out manually and a 
 preprocessor or otherwise condition statemnt will go over what 
 changes will be made if any
+
+Backwards compatibility notes of relevance at the moment:
+
+For python 2:
+
+ - classes are not automatically inherited from object
+   and therefore you have to do this explicitly
+ 
+ - you need to add a comment specifying an encoding at 
+   the the first line of the file
+
+ - range returns a list (use xrange instead)
+
+ - type annotations and the typing module were introduced in python 3.5
+
+ - f-strings were introduced in python 3.6 (use i.e. "%s" % ... instead)
 """
 
-from typing import Callable,Any
 from types import FunctionType
 from inspect import getsource
 from copy import deepcopy,copy
+from sys import version_info
 
-class Send:
+## python 2 compatibility ##
+if version_info < (3,):
+    range = xrange
+
+class Send(object):
     """
     Special class specifically used in combination with Generator
     to signal where and what to send
@@ -19,15 +40,15 @@ class Send:
     anywhere else. If used elsewhere or no variable has been sent 
     it will have no effect conceptually.
     """
-    def __init__(self,ID: str) -> None:
+    def __init__(self,ID):
         if not ID.isalnum():
             raise ValueError("ID must be alpha numeric e.g. ID.isalnum() should return True")
         self.ID=ID
 
-    def __repr__(self) -> str:
-        return f"Send('{self.ID}')"
+    def __repr__(self):
+        return "Send('%s')" % self.ID
 
-def collect_string(line: str) -> str:
+def collect_string(line):
     """collects a string from a string"""
     if line[0]!="'" or line[0]!='"':
         raise ValueError("'Send' must be given exactly one arguement of type 'str'")
@@ -43,7 +64,7 @@ def collect_string(line: str) -> str:
             break
     return string
 
-def cleaned_source_lines(source: str) -> list[str]:
+def cleaned_source_lines(source):
     """Formats the source code into lines"""
     # skip all strings, replace all ";" with "\n",replace all "\ ... \n" with "", split at \n
     lines=[]
@@ -86,8 +107,9 @@ TODO:
 2. handle loops e.g. for and while - _create_state
 3. what about yield from           - _create_state
 4. test everything
+5. test on async generators
 """
-class Generator:
+class Generator(object):
     """
     Converts a generator function into a generator 
     function that is copyable (e.g. shallow and deepcopy) 
@@ -123,7 +145,7 @@ class Generator:
     name function in my_pack.name to get the source code
     if desired.
     """
-    def _create_state(self,lineno: int) -> None:
+    def _create_state(self,lineno):
         """
         creates a section of modified source code to be used in a 
         function to act as a generators state
@@ -153,17 +175,17 @@ class Generator:
         ## update state position ##
         self.state_index+=1
 
-    def init_states(self) -> None:
+    def init_states(self):
         """
         Initializes the state generation
         it goes line by line to find the lines that have the yield statements
         """
         self.state_generator=(self._create_state(lineno) for lineno,line in enumerate(self._source_lines) if line.strip()[:4]=="yield")
 
-    def __len__(self) -> int:
+    def __len__(self):
         return sum(1 for line in self._source_lines if line.strip()[:4]=="yield")
 
-    def __init__(self,FUNC: Callable,**attrs) -> None:
+    def __init__(self,FUNC,**attrs):
         if attrs:
             for attr in ("source","_source_lines","gi_code","gi_frame","gi_running",
                          "gi_suspended","gi_yieldfrom","state","state_index","lineno",
@@ -197,7 +219,7 @@ class Generator:
     def __iter__(self) -> iter:
         return (next(self) for i in range(len(self)))
     
-    def __next__(self) -> Any:
+    def __next__(self):
         """
         1. change the state
         2. return the value
@@ -219,7 +241,7 @@ class Generator:
             #self._format_exception(e)
         return result
     
-    def send(self,arg: Any) -> None:
+    def send(self,arg):
         """
         Send takes exactly one arguement 'arg' that 
         is sent to the functions yield variable
@@ -227,23 +249,23 @@ class Generator:
         self.gi_frame.f_locals()[self.reciever]=arg
         return next(self)
 
-    def close(self) -> None:
+    def close(self):
         """Creates a simple empty generator"""
         self.state_generator=(None for i in ())
         self.gi_frame=None
         self.gi_running=False
         self.gi_suspended=False
 
-    def throw(self,exception: Exception) -> None:
+    def throw(self,exception):
         """Throws an error at the current line of execution in the function"""
         # get the current position (should be recorded and updated after every execution)
         self._format_exception(exception)
 
-    def _format_exception(self,exception: Exception):
+    def _format_exception(self,exception):
         """Raises an exception from the last line in the current state e.g. only from what has been"""
         pass
 
-    def _copier(self,FUNC: Callable) -> object:
+    def _copier(self,FUNC):
         """copying will create a new generator object but the copier will determine it's depth"""
         attrs=dict(
             zip(
@@ -255,18 +277,44 @@ class Generator:
             )
         return Generator(None,**attrs)
     # for copying
-    def __copy__(self) -> object:
+    def __copy__(self):
         return self._copier(copy)
-    def __deepcopy__(self,memo: dict) -> object:
+    def __deepcopy__(self,memo):
         return self._copier(deepcopy)
     #####################################################################################################   
     # for pickling
-    def __getstate__(self) -> dict:
+    def __getstate__(self):
         """Serializing pickle (what object you want serialized)"""
         _attrs=("source","pos","_states","gi_code","gi_frame","gi_running",
                 "gi_suspended","gi_yieldfrom","state_generator","state","reciever")
         return dict(zip(_attrs,(getattr(self,attr) for attr in _attrs)))
 
-    def __setstate__(self,state: dict) -> None:
+    def __setstate__(self,state):
         """Deserializing pickle (returns an instance of the object with state)"""
         Generator(None,**state)
+
+## add the type annotations if the version is 3.5 or higher ##
+if version_info[:3] <= (3,5):
+    from typing import Callable,Any,NoReturn
+    ## Send
+    Send.__init__.__annotations__={"ID":str,"return":None}
+    Send.__repr__.__annotations__={"return":str}
+    ## utility functions
+    collect_string.__annotations__={"line":str,"return":str}
+    cleaned_source_lines.__annotations__={"source":str,"return":list[str]}
+    ## Generator
+    Generator._create_state.__annotations__={"lineno":int,"return":None}
+    Generator.init_states.__annotations__={"return":None}
+    Generator.__len__.__annotations__={"return":int}
+    Generator.__init__.__annotations__={"FUNC":Callable,"return":None}
+    Generator.__iter__.__annotations__={"return":iter}
+    Generator.__next__.__annotations__={"return":Any}
+    Generator.send.__annotations__={"arg":Any,"return":Any}
+    Generator.close.__annotations__={"return":None}
+    Generator.throw.__annotations__={"exception":Exception,"return":None}
+    Generator._format_exception.__annotations__={"exception":Exception,"return":NoReturn}
+    Generator._copier.__annotations__={"FUNC":Callable,"return":Generator}
+    Generator.__copy__.__annotations__={"return":Generator}
+    Generator.__deepcopy__.__annotations__={"memo":dict,"return":Generator}
+    Generator.__getstate__.__annotations__={"return":dict}
+    Generator.__setstate__.__annotations__={"state":dict,"return":None}
