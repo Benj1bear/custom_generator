@@ -1,20 +1,81 @@
+"""
+In order to make this module as backwards compatible as possible 
+some of the functions used will be written out manually and a 
+preprocessor or otherwise condition statemnt will go over what 
+changes will be made if any
+"""
+
 from typing import Callable,Any,Generator
 from types import FunctionType
 from inspect import getsource
-import ast
 
-def empty_generator() -> Generator:
-    return (yield)
+class Send:
+    """
+    Special class specifically used in combination with Generator
+    to signal where and what to send
+    
+    Note: Send should only be used after a yield statement and not
+    anywhere else. If used elsewhere or no variable has been sent 
+    it will have no effect conceptually.
+    """
+    def __init__(self,ID: str) -> None:
+        if not ID.isalnum(): raise ValueError("ID must be alpha numeric e.g. ID.isalnum() should return True")
+        self.ID=ID
 
-def positions(node: type) -> tuple[int,int,int,int]:
-    """extracts the code positions from an ast.Node object"""
-    return node.col_offset,node.end_col_offset,node.lineno,node.end_lineno
+    def __repr__(self) -> str: return f"Send('{self.ID}')"
 
-## will probably remove since I've thought of another way that's cleaner ##
-def get_target_id(node: type) -> str:
-    return node.targets[0].id
+def collect_string(line: str) -> str:
+    """collects a string from a string"""
+    flag=0
+    string=""
+    reference_char=line[0]
+    line=iter(line)
+    for char in line:
+        string+=char
+        if char=="\\":
+            next(line)
+            continue
+        if char==reference_char and not backslash:
+            if flag: break
+            flag+=1
+    return string
 
-## needs more work + testing ##
+def cleaned_source_lines(source: str) -> list[str]:
+    """Formats the source code into lines"""
+    # skip all strings, replace all ";" with "\n",replace all "\ ... \n" with "", split at \n
+    lines=[]
+    line=""
+    backslash=False
+    instring=False
+    check_indents=True
+    source=iter(source)
+    for char in source:
+        ## skip strings ##
+        if char=="'" or char=='"' and not backslash:
+            instring=instring + 1 % 2
+            continue
+        if instring or (char==" " and not check_indents):
+            continue
+        ## if not in a string and the indents are fixed, then record the chars ##
+        line+=char
+        ## keep track of backslash ##
+        backslash=(char=="\\")
+        ## make sure the line is properly indented ##
+        if check_indents:
+            count=0
+            for char in source:
+                if char!=" ":
+                    check_indents=False
+                    break
+                count+=1
+            char+=" " * (4 - count % 4) % 4 # % 4 again in case of 0 giving: 4 - 0
+        ## create new line ##
+        if char=="\n" or char==";":
+            lines+=[line]
+            line=""
+            check_indents=True
+    return lines
+
 class Generator:
     """
     Converts a generator function into a generator 
@@ -25,7 +86,8 @@ class Generator:
     python implementations ideally.
     
     The dependencies for this to work only requires that you 
-    can retrieve your functions source code as a string.
+    can retrieve your functions source code as a string via
+    inspect.getsource.
 
     How it works:
     
@@ -36,44 +98,43 @@ class Generator:
     you happen to be using a function generator within 
     another function generator then make sure that all
     function generators (past one iteration) are of the 
-    copy_gen type)
+    Generator type)
     """
-    ## Will re-write since I've thought of another way to read off the parser for the states ##
-    def _create_state(self,node: type) -> tuple[str,str|None]:
+    def _create_state(self,lineno: int) -> None:
         """
         creates a section of modified source code to be used in a 
         function to act as a generators state
         """
-        ## may need a more nuanced approach here -----------------------------------
-        ## we need to know at least one target e.g. the first one/ any one will do
-        #####################################################################################################   
-        self.reciever=get_target_id(node) if type(node)==ast.Assign else None
-        #####################################################################################################   
         ## get the relevant code section based on the previous end position and the new end position
         self.pos=self.end_pos
         ## because they're tuples we should be fine with this approach to assignment ##
-        self.end_pos=positions(node)
+        self.end_pos=lineno
         ## extract the code section
+        lines=self._source_lines[self.pos[2]:self.end_pos[3]]
         #####################################################################################################   
-        # .replace(";","\n") won't work for all use cases (e.g. will need to skip over strings) -----------------
-        lines=self.source.replace(";","\n").split("\n")[self.pos[2]:self.end_pos[3]]
-        
-        print(f"{self.reciever=}")
-        print(lines)
-        
         lines[0]=lines[0][self.pos[0]:self.pos[1]]
         lines[-1]=lines[-1][self.end_pos[0]:self.end_pos[1]]
         self.state="\n".join(lines)
         #####################################################################################################
+        if self.state_index: ## assuming it's running
+            line=" ".join(lines[0].strip().split()) # .split() followed by .join ensures the spaces are the same
+            # as long as it's 'yield Send(' and Send is Send e.g. locally or globally defined and is correct
+            if line[:11]=='yield Send(' and (self.gi_frame.f_locals.get("Send",None)==Send or globals().get("Send",None)==Send):
+                self.reciever=collect_string(line[11:])
+            else:
+                self.reciever=None
         # update state position
         self.state_index+=1
         
     def init_states(self) -> None:
-        """Initializes the state generation"""
-        self.state_generator=(self._create_state(node) for node in ast.parse(self.source).body[0].body
-                              if hasattr(node,"value") and type(node.value)==ast.Yield)
+        """
+        Initializes the state generation
+        it goes line by line to find the lines that have the yield statements
+        """
+        self.state_generator=(self._create_state(lineno) for lineno,line in enumerate(self._source_lines) if line.strip()[:4]=="yield")
+
     def __len__(self) -> int:
-        return sum(1 for node in ast.parse(self.source).body[0].body if hasattr(node,"value") and type(node.value)==ast.Yield)
+        return sum(1 for index,line in enumerate(self._source_lines) if line.strip()[:4]=="yield")
 
     def __init__(self,FUNC: Callable,**attrs) -> None:
         if attrs:
@@ -83,6 +144,8 @@ class Generator:
                 setattr(self,attr,attrs[attr])
             return
         self.source=getsource(FUNC)
+        ## ast.unparse ast.parse cleans up the source
+        self._source_lines=cleaned_source_lines(self.source)
         # makes all yields returns, and handles .send by setting the variable used to None, and making note
         # of what the reciever is each time
         self.init_states()
@@ -133,7 +196,8 @@ class Generator:
 
     def close(self) -> None:
         """Creates a simple empty generator"""
-        self.state_generator=(None for i in range(0))
+        self.state_generator=(None for i in ())
+        ## remove the frame??
 
     def throw(self,exception: Exception) -> None:
         """Throws an error at the current line of execution in the function"""
@@ -145,6 +209,9 @@ class Generator:
         """Raises an exception from the last line in the current state e.g. only from what has been"""
         (self._create_state(node) for node in ast.parse(self.source).body[0].body
                               if hasattr(node,"value") and type(node.value)==ast.Yield)
+        
+        
+        
         if pos:
             pass
         print(self.source)
@@ -159,7 +226,7 @@ class Generator:
                         "gi_yieldfrom","state_generator","state","state_index","reciever"))
                 )
             )
-        return copy_gen(None,**attrs)
+        return Generator(None,**attrs)
     # for copying
     def __copy__(self) -> object: return self._copier(copy)
     def __deepcopy__(self,memo: dict) -> object: return self._copier(deepcopy)
