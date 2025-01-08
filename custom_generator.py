@@ -294,7 +294,7 @@ class Generator(object):
         Generator(None,**state)
 
 ## add the type annotations if the version is 3.5 or higher ##
-if version_info[:3] <= (3,5):
+if (3,5) <= version_info[:3]:
     from typing import Callable,Any,NoReturn
     ## Send
     Send.__init__.__annotations__={"ID":str,"return":None}
