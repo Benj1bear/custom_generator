@@ -5,9 +5,10 @@ preprocessor or otherwise condition statemnt will go over what
 changes will be made if any
 """
 
-from typing import Callable,Any,Generator
+from typing import Callable,Any
 from types import FunctionType
 from inspect import getsource
+from copy import deepcopy,copy
 
 class Send:
     """
@@ -22,11 +23,13 @@ class Send:
         if not ID.isalnum(): raise ValueError("ID must be alpha numeric e.g. ID.isalnum() should return True")
         self.ID=ID
 
-    def __repr__(self) -> str: return f"Send('{self.ID}')"
+    def __repr__(self) -> str:
+        return f"Send('{self.ID}')"
 
 def collect_string(line: str) -> str:
     """collects a string from a string"""
-    flag=0
+    if line[0]!="'" or line[0]!='"':
+        raise ValueError("'Send' must be given exactly one arguement of type 'str'")
     string=""
     reference_char=line[0]
     line=iter(line)
@@ -35,9 +38,8 @@ def collect_string(line: str) -> str:
         if char=="\\":
             next(line)
             continue
-        if char==reference_char and not backslash:
-            if flag: break
-            flag+=1
+        if char==reference_char:
+            break
     return string
 
 def cleaned_source_lines(source: str) -> list[str]:
@@ -76,6 +78,12 @@ def cleaned_source_lines(source: str) -> list[str]:
             check_indents=True
     return lines
 
+
+"""
+TODO:
+1. implement exception formmatter
+2. test everything
+"""
 class Generator:
     """
     Converts a generator function into a generator 
@@ -99,6 +107,18 @@ class Generator:
     another function generator then make sure that all
     function generators (past one iteration) are of the 
     Generator type)
+
+    Note: If wanting to use generator expressions i.e.:
+    
+    (i for i in range(3))
+    
+    then you can pass it in as a string:
+    
+    Generator("(i for i in range(3))")
+    
+    otherwise you could also do something similar to the
+    name function in my_pack.name to get the source code
+    if desired.
     """
     def _create_state(self,lineno: int) -> None:
         """
@@ -106,26 +126,23 @@ class Generator:
         function to act as a generators state
         """
         ## get the relevant code section based on the previous end position and the new end position
-        self.pos=self.end_pos
-        ## because they're tuples we should be fine with this approach to assignment ##
-        self.end_pos=lineno
+        self.lineno=self.end_lineno
+        ## because they're ints we should be fine with this approach to assignment ##
+        self.end_lineno=lineno
         ## extract the code section
-        lines=self._source_lines[self.pos[2]:self.end_pos[3]]
-        #####################################################################################################   
-        lines[0]=lines[0][self.pos[0]:self.pos[1]]
-        lines[-1]=lines[-1][self.end_pos[0]:self.end_pos[1]]
+        lines=self._source_lines[self.lineno:self.end_lineno]
         self.state="\n".join(lines)
         #####################################################################################################
         if self.state_index: ## assuming it's running
             line=" ".join(lines[0].strip().split()) # .split() followed by .join ensures the spaces are the same
-            # as long as it's 'yield Send(' and Send is Send e.g. locally or globally defined and is correct
-            if line[:11]=='yield Send(' and (self.gi_frame.f_locals.get("Send",None)==Send or globals().get("Send",None)==Send):
+            # as long as it's 'Send(' and Send is Send e.g. locally or globally defined and is correct
+            if line[:5]=='Send(' and (self.gi_frame.f_locals.get("Send",None)==Send or globals().get("Send",None)==Send):
                 self.reciever=collect_string(line[11:])
             else:
                 self.reciever=None
         # update state position
         self.state_index+=1
-        
+
     def init_states(self) -> None:
         """
         Initializes the state generation
@@ -134,33 +151,38 @@ class Generator:
         self.state_generator=(self._create_state(lineno) for lineno,line in enumerate(self._source_lines) if line.strip()[:4]=="yield")
 
     def __len__(self) -> int:
-        return sum(1 for index,line in enumerate(self._source_lines) if line.strip()[:4]=="yield")
+        return sum(1 for line in self._source_lines if line.strip()[:4]=="yield")
 
     def __init__(self,FUNC: Callable,**attrs) -> None:
         if attrs:
-            for attr in ("source","gi_code","gi_frame","gi_running","gi_suspended",
-                         "gi_yieldfrom","state_generator","state","state_index",
-                         "reciever","pos","end_pos"):
+            for attr in ("source","_source_lines","gi_code","gi_frame","gi_running",
+                         "gi_suspended","gi_yieldfrom","state","state_index","lineno",
+                         "end_lineno","reciever","state_generator"):
                 setattr(self,attr,attrs[attr])
             return
-        self.source=getsource(FUNC)
-        ## ast.unparse ast.parse cleans up the source
+        ## you have to pass the source code in manually for generator expressions ##
+        ## (getsource does work for lambda expressions but it's got no col_offset which is not useful) ##
+        if isinstance(FUNC,str):
+            self.source=FUNC
+        else:
+            self.source=getsource(FUNC)
+        ## format into lines
         self._source_lines=cleaned_source_lines(self.source)
-        # makes all yields returns, and handles .send by setting the variable used to None, and making note
-        # of what the reciever is each time
+        # makes all yields returns, handles .send by setting the variable 
+        # used to None, and noting what the reciever is each time
         self.init_states()
         self.gi_code=FUNC.__code__
         self.gi_frame=None
         self.gi_running=False
         self.gi_suspended=False
-        # not sure what this is supposed to return for now
-        self.gi_yieldfrom=None
+        self.gi_yieldfrom=None # not sure what this is supposed to return for now
         ## new part which makes it easy to work with ##
         self.state=None
         self.state_index=0 # indicates which state the generator is in
-        self.pos=self.end_pos=(0,)*4
+        self.lineno=0
+        self.end_lineno=0
         self.reciever=None ## used on .send (shouldn't be modified)
-    
+
     def __iter__(self) -> iter:
         return (next(self) for i in range(len(self)))
     
@@ -205,39 +227,35 @@ class Generator:
         self.format_exception(exception)
     #####################################################################################################
     ## needs work ----------------------------------------------------------------------- ##
-    def format_exception(self,exception: Exception,*pos):
+    def format_exception(self,exception: Exception):
         """Raises an exception from the last line in the current state e.g. only from what has been"""
-        (self._create_state(node) for node in ast.parse(self.source).body[0].body
-                              if hasattr(node,"value") and type(node.value)==ast.Yield)
-        
-        
-        
-        if pos:
-            pass
-        print(self.source)
-        raise exception
+        # not sure how this will work exactly how I want it to ... but I'll think of something
+        pass
     #####################################################################################################
     def _copier(self,FUNC: Callable) -> object:
         """copying will create a new generator object but the copier will determine it's depth"""
         attrs=dict(
             zip(
                 ((attr,FUNC(getattr(self,attr))) for attr in \
-                        ("source","pos","gi_code","gi_frame","gi_running","gi_suspended",
-                        "gi_yieldfrom","state_generator","state","state_index","reciever"))
+                        ("source","_source_lines","gi_code","gi_frame","gi_running",
+                         "gi_suspended","gi_yieldfrom","state","state_index","lineno",
+                         "end_lineno","reciever","state_generator"))
                 )
             )
         return Generator(None,**attrs)
     # for copying
-    def __copy__(self) -> object: return self._copier(copy)
-    def __deepcopy__(self,memo: dict) -> object: return self._copier(deepcopy)
+    def __copy__(self) -> object:
+        return self._copier(copy)
+    def __deepcopy__(self,memo: dict) -> object:
+        return self._copier(deepcopy)
     #####################################################################################################   
     # for pickling
     def __getstate__(self) -> dict:
         """Serializing pickle (what object you want serialized)"""
         _attrs=("source","pos","_states","gi_code","gi_frame","gi_running",
                 "gi_suspended","gi_yieldfrom","state_generator","state","reciever")
-        return dict(zip(_attrs,(getattr(code,attr) for attr in _attrs)))
+        return dict(zip(_attrs,(getattr(self,attr) for attr in _attrs)))
 
     def __setstate__(self,state: dict) -> None:
         """Deserializing pickle (returns an instance of the object with state)"""
-        copy_gen(None,**state)
+        Generator(None,**state)
