@@ -75,6 +75,13 @@ def is_alternative_statement(line):
     """Checks if a line is an alternative statement"""
     return line.startswith("elif") or line.startswith("else") or line.startswith("case") or line.startswith("default")
 
+def strip_indentation(source):
+    """make sure the first line is properly indented for ';' usage"""
+    char=next(source)
+    while char==" ":
+        char=next(source)
+    return source
+
 """
 TODO:
 1. implement exception formmatter  - format_exception
@@ -119,7 +126,8 @@ class Generator(object):
     name function in my_pack.name to get the source code
     if desired.
     """
-    
+
+
     ### Lots of fixes need to be implemented on _cleaned_source_lines ###
 
     ## needs fixing e.g. replace all yields with returns, yield from needs to be edited,
@@ -127,46 +135,35 @@ class Generator(object):
     ## also, make note of the return linenos since they are different from yields
     def _cleaned_source_lines(self):
         """Formats the source code into lines"""
+        source=iter(self.source)
+        ## clean the first indentation of any unnecessary whitespace ##
+        source=strip_indentation(source)
+        line+=next(source)
+        if line=="\n":
+            line=""
+        else:
+            line=" "*4+line
         # skip all strings, replace all ";" with "\n",replace all "\ ... \n" with "", split at \n
         # replace all yields with returns and all yield from ... with while loops
-        lines=[]
-        line=""
-        backslash=False
-        instring=False
-        check_indents=True
-        source=iter(self.source)
+        lines,backslash,instring=[],False,False
         for char in source:
+            ## keep track of backslash ##
+            backslash=(char=="\\")
             ## skip strings ##
             if char=="'" or char=='"' and not backslash:
                 instring=instring + 1 % 2
                 continue
-            if instring or (char==" " and not check_indents):
+            if instring or char==" ":
                 continue
-            ## if not in a string and the indents are fixed, then record the chars ##
+            ## if not in a string then record the chars ##
             line+=char
-            ## keep track of backslash ##
-            backslash=(char=="\\")
-            ## make sure the line is properly indented ##
-            if check_indents:
-                count=0
-                for char in source:
-                    if char!=" ":
-                        check_indents=False
-                        break
-                    count+=1
-                char+=" " * (4 - count % 4) % 4 # % 4 again in case of 0 giving: 4 - 0
             ## create new line ##
-            if char=="\n" or char==";":
+            if char=="\n":
                 lines+=[line]
                 line=""
-                check_indents=True
-        ## fix the indentation at the beginning ##
-        for shift,char in enumerate(lines[0]):
-            if char!=" ":
-                break
-        shift=shift-shift%4
-        if shift:
-            lines[0]=" "*4+lines[0][shift:]
+            elif char==";":
+                lines+=[line]
+                source,line=strip_indentation(source)," "*4
         self._source_lines="".join(lines)
 
     def _control_flow_adjust(self,lines):
@@ -360,8 +357,9 @@ if (3,5) <= version_info[:3]:
     collect_string.__annotations__={"line":str,"return":str}
     get_indent.__annotations__={"line":str,"return":int}
     is_alternative_statement.__annotations__={"line":str,"return":bool}
+    strip_indentation.__annotations__={"source":str,"return":tuple[str,str]}
     ## Generator
-    Generator.cleaned_source_lines.__annotations__={"source":str,"return":list[str]}
+    Generator._cleaned_source_lines.__annotations__={"source":str,"return":list[str]}
     Generator._control_flow_adjust.__annotations__={"lines":list[str],"return":list[str]}
     Generator._adjust.__annotations__={"lines":list[str],"return":str}
     Generator._create_state.__annotations__={"lineno":int,"return":None}
