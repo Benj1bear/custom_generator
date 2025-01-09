@@ -127,11 +127,25 @@ class Generator(object):
     if desired.
     """
 
+    def _handle_keywords(self,source,index,number_of_lines):
+        """
+        determines if the char follows with a keyword
+        and if so creates adjustments or records data
+        """
+        temp=self.source[index:]
+        if temp.startswith("yield"):
+            skip(source,5)
+            return "return"
+        elif temp.startswith("return"):
+            self._return_linenos+=[number_of_lines+1]
+
     def _cleaned_source_lines(self):
         """
         1. fixes any indentation issues (when ';' is used) and skips empty lines
-        2. split at all "\n" and ";"
-        3. replaces all "\ ... \n" with ""
+        2. split on "\n" and ";"
+        3. join up the line continuations i.e. "\ ... " will be skipped
+        ------------------------------------------
+        -  _handle_keywords does the following:  -
         ------------------------------------------
         4. replace all lines that start with yields with returns to start with
         5. track the linenos of returns
@@ -140,37 +154,42 @@ class Generator(object):
         """
         ## setup source as an iterator and making sure the first indentation's correct ##
         source=iter(self.source[get_indent(self.source):])
-        line,lines,backslash,instring=" "*4,[],False,False
-        reference_char=0
-        reference_chars=["return","yield","yield from"]
+        line,lines,backslash,instring,number_of_lines=" "*4,[],False,False,0
         ## enumerate since I want the loop to use an iterator but the 
         ## index is needed to retain it for when it's used on get_indent
         for index,char in enumerate(source):
-            ## keep track of backslash ##
-            backslash=(char=="\\")
             ## skip strings ##
             if char=="'" or char=='"' and not backslash:
                 instring=instring + 1 % 2
                 line+=char
                 continue
             if instring:
+                ## keep track of backslash ##
+                backslash=(char=="\\")
                 line+=char
                 continue
             ## collection and matching ##
-            if char in reference_chars:
-                reference_char=char
+            result=self._handle_keywords(source,index,number_of_lines)
+            if result:
+                line+=result
+                continue
+            ## join everything after the line continuation until the next \n or ; ##
+            if char=="\\":
+                skip(source,get_indent(self.source[index+1:])) ## +1 since index: is inclusive ##
             ## create new line ##
             if char=="\n":
                 if line.strip():
                     lines+=[line]
+                    number_of_lines+=1
                 line=""
             elif char==";":
                 lines+=[line]
+                number_of_lines+=1
                 line=" "*4
-                skip(source,get_indent(self.source[index:]))
+                skip(source,get_indent(self.source[index+1:]))
             ## if not in a string then record the chars ##
             line+=char
-        self._source_lines="".join(lines)
+        self._source_lines=lines
 
     def _control_flow_adjust(self,lines):
         """
@@ -238,7 +257,7 @@ class Generator(object):
         Initializes the state generation
         it goes line by line to find the lines that have the yield statements
         """
-        while self.state and self.lineno not in self.return_linenos:
+        while self.state and self.lineno not in self._return_linenos:
             try:
                 yield self._create_state()
             except StopIteration:
@@ -260,7 +279,8 @@ class Generator(object):
             self.source=getsource(FUNC)
             self.gi_code=FUNC.__code__
         ## format into lines ##
-        self.cleaned_source_lines()
+        self._cleaned_source_lines()
+        self._return_linenos=[]
         self.gi_frame=None
         self.gi_running=False
         self.gi_suspended=False
@@ -369,6 +389,7 @@ if (3,5) <= version_info[:3]:
     skip.__annotations__={"iter_val":Iterable,"n":int,"return":None}
     is_alternative_statement.__annotations__={"line":str,"return":bool}
     ## Generator
+    Generator._handle_keywords.__annotations__={"source":str,"index":int,"char":str,"number_of_lines":int,"return":bool|None}
     Generator._cleaned_source_lines.__annotations__={"source":str,"return":list[str]}
     Generator._control_flow_adjust.__annotations__={"lines":list[str],"return":list[str]}
     Generator._adjust.__annotations__={"lines":list[str],"return":str}
