@@ -66,21 +66,21 @@ def collect_string(line):
 
 def get_indent(line):
     """Gets the number of spaces used in an indentation"""
-    for index,char in enumerate(line):
-        if char!=" ":
-            break
-    return index+1
+    count=0
+    while line[count]!=" ":
+        count+=1
+    return count
 
+def skip(iter_val,n):
+    """Skips the next n iterations in a for loop"""
+    for _ in range(n):
+        next(iter_val)
+
+## you could have an alternative definition for this function
+## e.g. since match case default was introduced in python 3.10
 def is_alternative_statement(line):
     """Checks if a line is an alternative statement"""
     return line.startswith("elif") or line.startswith("else") or line.startswith("case") or line.startswith("default")
-
-def strip_indentation(source):
-    """make sure the first line is properly indented for ';' usage"""
-    char=next(source)
-    while char==" ":
-        char=next(source)
-    return source
 
 """
 TODO:
@@ -127,46 +127,56 @@ class Generator(object):
     if desired.
     """
 
-
-    ### Lots of fixes need to be implemented on _cleaned_source_lines ###
-
-    ## needs fixing e.g. replace all yields with returns, yield from needs to be edited,
-    ## for and while loops + fix the indentation at the start if necessary
-    ## also, make note of the return linenos since they are different from yields
     def _cleaned_source_lines(self):
-        """Formats the source code into lines"""
-        source=iter(self.source)
-        ## clean the first indentation of any unnecessary whitespace ##
-        source=strip_indentation(source)
-        line+=next(source)
-        if line=="\n":
-            line=""
-        else:
-            line=" "*4+line
-        # skip all strings, replace all ";" with "\n",replace all "\ ... \n" with "", split at \n
-        # replace all yields with returns and all yield from ... with while loops
-        lines,backslash,instring=[],False,False
-        for char in source:
+        """
+        1. fixes any indentation issues (when ';' is used) and skips empty lines
+        2. split at all "\n" and ";"
+        3. replaces all "\ ... \n" with ""
+        ------------------------------------------
+        4. replace all lines that start with yields with returns to start with
+        5. track the linenos of returns
+        6. tend to all yield from ... with while loops
+        7. tend to all for and while loops if necessary
+        """
+        ## setup source as an iterator and making sure the first indentation's correct ##
+        source=iter(self.source[get_indent(self.source):])
+        line,lines,backslash,instring=" "*4,[],False,False
+        reference_char=0
+        reference_chars=["return","yield","yield from"]
+        ## enumerate since I want the loop to use an iterator but the 
+        ## index is needed to retain it for when it's used on get_indent
+        for index,char in enumerate(source):
             ## keep track of backslash ##
             backslash=(char=="\\")
             ## skip strings ##
             if char=="'" or char=='"' and not backslash:
                 instring=instring + 1 % 2
+                line+=char
                 continue
-            if instring or char==" ":
+            if instring:
+                line+=char
                 continue
-            ## if not in a string then record the chars ##
-            line+=char
+            ## collection and matching ##
+            if char in reference_chars:
+                reference_char=char
             ## create new line ##
             if char=="\n":
-                lines+=[line]
+                if line.strip():
+                    lines+=[line]
                 line=""
             elif char==";":
                 lines+=[line]
-                source,line=strip_indentation(source)," "*4
+                line=" "*4
+                skip(source,get_indent(self.source[index:]))
+            ## if not in a string then record the chars ##
+            line+=char
         self._source_lines="".join(lines)
 
     def _control_flow_adjust(self,lines):
+        """
+        removes unreachable control flow blocks that 
+        will get in the way of the generators state
+        """
         current_min=get_indent(lines[self.lineno-1])
         alternative=False
         new_lines=[]
@@ -349,15 +359,15 @@ class Generator(object):
 
 ## add the type annotations if the version is 3.5 or higher ##
 if (3,5) <= version_info[:3]:
-    from typing import Callable,Any,NoReturn
+    from typing import Callable,Any,NoReturn,Iterable
     ## Send
     Send.__init__.__annotations__={"ID":str,"return":None}
     Send.__repr__.__annotations__={"return":str}
     ## utility functions
     collect_string.__annotations__={"line":str,"return":str}
     get_indent.__annotations__={"line":str,"return":int}
+    skip.__annotations__={"iter_val":Iterable,"n":int,"return":None}
     is_alternative_statement.__annotations__={"line":str,"return":bool}
-    strip_indentation.__annotations__={"source":str,"return":tuple[str,str]}
     ## Generator
     Generator._cleaned_source_lines.__annotations__={"source":str,"return":list[str]}
     Generator._control_flow_adjust.__annotations__={"lines":list[str],"return":list[str]}
