@@ -270,7 +270,7 @@ class Generator(object):
             except StopIteration:
                 break
 
-    class frame:
+    class frame(object):
         """acts as the initial FrameType"""
         f_locals={}
 
@@ -425,6 +425,7 @@ if (3,5) <= version_info[:3]:
     Generator._create_state.__annotations__={"lineno":int,"return":None}
     Generator.init_states.__annotations__={"return":None}
     Generator.__init__.__annotations__={"FUNC":Callable,"return":None}
+    Generator.__len__.__annotations__={"return":int}
     Generator.__iter__.__annotations__={"return":iter}
     Generator.__next__.__annotations__={"return":Any}
     Generator.send.__annotations__={"arg":Any,"return":Any}
