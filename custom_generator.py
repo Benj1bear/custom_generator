@@ -252,7 +252,7 @@ class Generator(object):
         ## setup source as an iterator and making sure the first indentation's correct ##
         source=iter(self.source[get_indent(self.source):])
         self.return_linenos=[]
-        line,lines,backslash,instring,number_of_lines,reference_indents=" "*4,[],False,False,0,None
+        line,lines,backslash,instring,number_of_lines,reference_indents=" "*4,[],False,False,0,4
         ## enumerate since I want the loop to use an iterator but the 
         ## index is needed to retain it for when it's used on get_indent
         for index,char in enumerate(source):
@@ -260,37 +260,31 @@ class Generator(object):
             if char=="'" or char=='"' and not backslash:
                 instring=(instring + 1) % 2
                 line+=char
-                continue
-            if instring:
+            elif instring:
                 ## keep track of backslash ##
                 backslash=(char=="\\")
                 line+=char
-                continue
-            ## skip whitespace ##
-            if char==" ":
-                continue
             ## join everything after the line continuation until the next \n or ; ##
-            if char=="\\":
+            elif char=="\\":
                 skip(source,get_indent(self.source[index+1:])) ## +1 since index: is inclusive ##
-                continue
             ## create new line ##
-            if char=="\n":
-                if line.strip():
-                    ## translate keywords for this generator ##
-                    if get_indent(line) <= reference_indents: ## if it were not for skipping whitespace we'd also have: 'not line.isspace()' added in the condition
+            elif char=="\n":
+                if line.strip(): ## empty lines are possible ##
+                    if get_indent(line) <= reference_indents: ## translate keywords for this generator ##
                         line,reference_indents=self._translate_source_lines(line)
                     lines+=[line]
                     number_of_lines+=1
-                line=""
+                line="" ## we can't skip whitespace if we do this ##
             elif char==";":
-                if get_indent(line) < reference_indents:
-                    line,reference_indents=self._translate_source_lines(line)
-                lines+=[line]
-                number_of_lines+=1
+                if line.strip(): ## empty lines are possible ##
+                    if get_indent(line) <= reference_indents:
+                        line,reference_indents=self._translate_source_lines(line)
+                    lines+=[line]
+                    number_of_lines+=1
                 line=" "*4
                 skip(source,get_indent(self.source[index+1:]))
-            ## if not in a string then record the chars ##
-            line+=char
+            else:
+                line+=char
         self._source_lines=lines
 
     def _translate_source(self):
