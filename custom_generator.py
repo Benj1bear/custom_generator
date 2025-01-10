@@ -69,7 +69,9 @@ def collect_string(line):
 def get_indent(line):
     """Gets the number of spaces used in an indentation"""
     count=0
-    while line[count]!=" ":
+    for char in line:
+        if char!=" ":
+            break
         count+=1
     return count
 
@@ -78,19 +80,26 @@ def skip(iter_val,n):
     for _ in range(n):
         next(iter_val)
 
-## you could have an alternative definition for this function
-## e.g. since match case default was introduced in python 3.10
-def is_alternative_statement(line):
-    """Checks if a line is an alternative statement"""
-    return line.startswith("elif") or line.startswith("else") or line.startswith("case") or line.startswith("default")
+## match case default was introduced in python 3.10
+if version_info < (3,10):
+    def is_alternative_statement(line):
+        return line.startswith("elif") or line.startswith("else")
+else:
+    def is_alternative_statement(line):
+        return line.startswith("elif") or line.startswith("else") or line.startswith("case") or line.startswith("default")
+is_alternative_statement.__doc__="Checks if a line is an alternative statement"
 
 """
 TODO:
-1. implement exception formmatter  - format_exception
-2. handle loops e.g. for and while - _create_state
-3. what about yield from           - _create_state
-4. test everything (send probably needs to be re thought as well; make sure lineno is correct)
-5. test on async generators
+1. implement exception formmatter                   - format_exception
+2. handle loops e.g. for and while                  - _loop_adjust
+3. what about yield from                            - _handle_keywords/_cleaned_source_lines
+4. make sure inner classes/functions are unaffected - _handle_keywords/_cleaned_source_lines
+5. _control_flow_adjust needs fixing e.g. need to 
+   dedent the first recognised block to 4 indents
+6. fix anything that creates Generator from attrs since attrs will likely change
+7. test everything (send probably needs to be re thought as well; make sure lineno is correct)
+8. test on async generators
 """
 class Generator(object):
     """
@@ -128,72 +137,17 @@ class Generator(object):
     name function in my_pack.name to get the source code
     if desired.
     """
-
-    def _handle_keywords(self,source,index,number_of_lines):
-        """
-        determines if the char follows with a keyword
-        and if so creates adjustments or records data
-        """
-        temp=self.source[index:]
-        if temp.startswith("yield"):
-            skip(source,5)
-            return "return"
-        elif temp.startswith("return"):
-            self.return_linenos+=[number_of_lines+1]
-
-    def _cleaned_source_lines(self):
-        """
-        1. fixes any indentation issues (when ';' is used) and skips empty lines
-        2. split on "\n" and ";"
-        3. join up the line continuations i.e. "\ ... " will be skipped
-        ------------------------------------------
-        -  _handle_keywords does the following:  -
-        ------------------------------------------
-        4. replace all lines that start with yields with returns to start with
-        5. track the linenos of returns
-        6. tend to all yield from ... with while loops
-        7. tend to all for and while loops if necessary
-        """
-        ## setup source as an iterator and making sure the first indentation's correct ##
-        source=iter(self.source[get_indent(self.source):])
-        self.return_linenos=[]
-        line,lines,backslash,instring,number_of_lines=" "*4,[],False,False,0
-        ## enumerate since I want the loop to use an iterator but the 
-        ## index is needed to retain it for when it's used on get_indent
-        for index,char in enumerate(source):
-            ## skip strings ##
-            if char=="'" or char=='"' and not backslash:
-                instring=(instring + 1) % 2
-                line+=char
-                continue
-            if instring:
-                ## keep track of backslash ##
-                backslash=(char=="\\")
-                line+=char
-                continue
-            ## collection and matching ##
-            result=self._handle_keywords(source,index,number_of_lines)
-            if result:
-                line+=result
-                continue
-            ## join everything after the line continuation until the next \n or ; ##
-            if char=="\\":
-                skip(source,get_indent(self.source[index+1:])) ## +1 since index: is inclusive ##
-                continue
-            ## create new line ##
-            if char=="\n":
-                if line.strip():
-                    lines+=[line]
-                    number_of_lines+=1
-                line=""
-            elif char==";":
-                lines+=[line]
-                number_of_lines+=1
-                line=" "*4
-                skip(source,get_indent(self.source[index+1:]))
-            ## if not in a string then record the chars ##
-            line+=char
-        self._source_lines=lines
+    # def _handle_keywords(self,source,index,char,number_of_lines):
+    #     ## handles keywords ##
+    #     temp=self.source[index:]
+    #     ## make sure the definitions are unaffected
+    #     if temp.startswith("def") or temp.startswith("class"):
+    #         reference_indents=get_indent(line)
+    #     if temp.startswith("yield"):
+    #         skip(source,5)
+    #         return "return"
+    #     elif temp.startswith("return"):
+    #         self.return_linenos+=[number_of_lines+1]
 
     ## need to adjust for the indentation of the control flow blocks ##
     def _control_flow_adjust(self,lines):
@@ -220,18 +174,14 @@ class Generator(object):
         return new_lines
 
     ## need to add loop adjustments ##
-    def _adjust(self,lines):
+    def _loop_adjust(self,lines):
         """
         adjusts source code about control flow statements
         so that it can be used in a single directional flow
         as the generators states
         """
-        if self.jump_target[0]: ## loop adjustments ##
-            head=self._control_flow_adjust(lines[self.lineno-1:self.jump_target[1]-1])
-            lines=head+lines[self.jump_target[0]-1:]
-        else: ## control flow adjustments ##
-            lines=self._control_flow_adjust(lines)
-        self.state="\n".join(lines)
+        ## check for loops ##
+        return ""
 
     def _set_reciever(self,lines):
         """sets the reciever of the generator"""
@@ -254,25 +204,109 @@ class Generator(object):
         control flow statements, loops, etc. then set the adjusted 
         source code as the generators state
         """
+        self.lineno+=self.gi_frame.f_lineno-self.init_len
         ## extract the code section ##
         lines=self._source_lines[self.lineno:]
         self._set_reciever(lines)
-        self._adjust(lines)
+        self.state="\n".join(self._control_flow_adjust(lines)+self._loop_adjust(lines))
+
+    class frame(object):
+        """acts as the initial FrameType"""
+        f_locals={}
+        f_lineno=0
+
+    init="""
+    locals().update(f_locals)
+    frame=currentframe()
+    frame.f_back.f_locals['self'].gi_frame=frame
+    ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(frame.f_back), ctypes.c_int(0))
+"""
+    init_len=init.count("\n")+1
 
     def init_states(self):
         """
         Initializes the state generation
-        it goes line by line to find the lines that have the yield statements
+
+        It goes line by line to find the 
+        lines that have the yield statements
         """
+        ## define the state related variables in here for ease of use ##
+        self.gi_frame=self.frame()
+        self.gi_running=False
+        self.gi_suspended=False
+        self.gi_yieldfrom=None # not sure what this is supposed to return for now
+        self.lineno=0 ## the current line number relative to self._source_lines ##
+        self.gi_frame.f_lineno=self.init_len
         while self.state and self.lineno not in self.return_linenos:
             try:
                 yield self._create_state()
             except StopIteration:
                 break
 
-    class frame(object):
-        """acts as the initial FrameType"""
-        f_locals={}
+    def _clean_source_lines(self):
+        """
+        1. fixes any indentation issues (when ';' is used) and skips empty lines
+        2. split on "\n" and ";"
+        3. join up the line continuations i.e. "\ ... " will be skipped
+        """
+        ## setup source as an iterator and making sure the first indentation's correct ##
+        source=iter(self.source[get_indent(self.source):])
+        self.return_linenos=[]
+        line,lines,backslash,instring,number_of_lines,reference_indents=" "*4,[],False,False,0,None
+        ## enumerate since I want the loop to use an iterator but the 
+        ## index is needed to retain it for when it's used on get_indent
+        for index,char in enumerate(source):
+            ## skip strings ##
+            if char=="'" or char=='"' and not backslash:
+                instring=(instring + 1) % 2
+                line+=char
+                continue
+            if instring:
+                ## keep track of backslash ##
+                backslash=(char=="\\")
+                line+=char
+                continue
+            ## skip whitespace ##
+            if char==" ":
+                continue
+            ## join everything after the line continuation until the next \n or ; ##
+            if char=="\\":
+                skip(source,get_indent(self.source[index+1:])) ## +1 since index: is inclusive ##
+                continue
+            ## create new line ##
+            if char=="\n":
+                if line.strip():
+                    ## translate keywords for this generator ##
+                    if get_indent(line) <= reference_indents: ## if it were not for skipping whitespace we'd also have: 'not line.isspace()' added in the condition
+                        line,reference_indents=self._translate_source_lines(line)
+                    lines+=[line]
+                    number_of_lines+=1
+                line=""
+            elif char==";":
+                if get_indent(line) < reference_indents:
+                    line,reference_indents=self._translate_source_lines(line)
+                lines+=[line]
+                number_of_lines+=1
+                line=" "*4
+                skip(source,get_indent(self.source[index+1:]))
+            ## if not in a string then record the chars ##
+            line+=char
+        self._source_lines=lines
+
+    def _translate_source(self):
+        """
+        translates the source code into code 
+        that's usable to this custom generator
+
+        It does the following to the source lines:
+
+        1. replace all lines that start with yields with returns to start with
+        2. track the linenos of returns
+        3. tend to all yield from ... with while loops
+        4. tend to all for and while loops if necessary
+        """
+        ## translate the source code ##
+        self.state="\n".join(self._source_lines)
 
     def __init__(self,FUNC,**attrs):
         if attrs:
@@ -289,13 +323,8 @@ class Generator(object):
         else:
             self.source=getsource(FUNC)
             self.gi_code=FUNC.__code__
-        ## format into lines ##
-        self._cleaned_source_lines()
-        self.gi_frame=self.frame()
-        self.gi_running=False
-        self.gi_suspended=False
-        self.gi_yieldfrom=None # not sure what this is supposed to return for now
-        self.lineno=0
+        ## make sure the source code is standardized and usable by this generator ##
+        self._clean_source_lines()
         ## create the states ##
         self.state_generator=self.init_states()
 
@@ -325,7 +354,7 @@ class Generator(object):
                 yield next(self)
             except StopIteration:
                 break
-    
+
     def __next__(self):
         """
         1. change the state
@@ -338,13 +367,7 @@ class Generator(object):
             self.gi_running=True
             self.gi_suspended=True
         ## update with the new state and get the frame ##
-        init="""
-    locals().update(f_locals)
-    frame=currentframe()
-    frame.f_back.f_locals['self'].gi_frame=frame
-    ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(frame.f_back), ctypes.c_int(0))
-"""
-        exec("def next_state(f_locals):"+init+self.state,globals(),locals())
+        exec("def next_state(f_locals):"+self.init+self.state,globals(),locals())
         # get the locals dict, update the line position, and return the result
         try:
             return locals()["next_state"](self.gi_frame.f_locals)
@@ -417,13 +440,13 @@ if (3,5) <= version_info[:3]:
     skip.__annotations__={"iter_val":Iterable,"n":int,"return":None}
     is_alternative_statement.__annotations__={"line":str,"return":bool}
     ## Generator
-    Generator._handle_keywords.__annotations__={"source":str,"index":int,"char":str,"number_of_lines":int,"return":bool|None}
-    Generator._cleaned_source_lines.__annotations__={"source":str,"return":list[str]}
     Generator._control_flow_adjust.__annotations__={"lines":list[str],"return":list[str]}
     Generator._set_reciever.__annotations__={"lines":list[str],"return":None}
-    Generator._adjust.__annotations__={"lines":list[str],"return":str}
+    Generator._loop_adjust.__annotations__={"lines":list[str],"return":str}
     Generator._create_state.__annotations__={"lineno":int,"return":None}
     Generator.init_states.__annotations__={"return":None}
+    Generator._clean_source_lines.__annotations__={"return":None}
+    Generator._translate_source.__annotations__={"return":None}
     Generator.__init__.__annotations__={"FUNC":Callable,"return":None}
     Generator.__len__.__annotations__={"return":int}
     Generator.__iter__.__annotations__={"return":iter}
