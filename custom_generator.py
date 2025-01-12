@@ -90,21 +90,39 @@ else:
         return line.startswith("elif") or line.startswith("else") or line.startswith("case") or line.startswith("default")
 is_alternative_statement.__doc__="Checks if a line is an alternative statement"
 
-
-
 """ 
 Priority:
- - custom_adjust: need to get the iterator from for loop parsed, then get the jump positions
- - set_reciever
+ - custom_adjust: get the jump positions, adjust for nested for loops
+ - set_reciever: think about either parsing or something else
 """
+def extract_iter(line):
+    """
+    Extracts the iterator from a for loop
+    
+    e.g. we extract the second ... in:
+    for ... in ...:
+    """
+    # 1. get the length of the ids on the left hand side of the "in" keyword
+    for index,char in enumerate(line):
+        if char.isalphnum():
+            ID+=char
+            if ID=="in":
+                break
+        else:
+            ID=""
+    # 2. collect everything on the right hand side of the "in" keyword
+    # 3. remove the end colon
+    ## +1 for 0 based indexing, +1 for whitespace after ##
+    return line[index+2:][:-1]
+
 def custom_adjustment(line):
     """
     It does the following to the source lines:
 
     1. replace all lines that start with yields with returns to start with
-    2. track the linenos of returns
+    2. make sure the generator is closed on regular returns
     3. save the iterator from the for loops replacing with a nonlocal variation
-    4. tend to all yield from ... with for loops
+    4. tend to all yield from ... with the same for loop variation
     """
     number_of_indents=get_indent(line)
     indent=" "*number_of_indents
@@ -116,11 +134,11 @@ def custom_adjustment(line):
                 indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
                 indent+"    return currentframe().f_back.f_locals['.i']"]
     elif temp_line.startswith("for "):
-        return [indent+"currentframe().f_back.f_locals['.iter']=(iter(range(3)),iter(range(3)))",
+        return [indent+"currentframe().f_back.f_locals['.iter']=(iter(%s),)" % extract_iter(temp_line[3:]),
                 indent+"for i in currentframe().f_back.f_locals['.iter'][0]:"]
     elif temp_line.startswith("return "):
         ## close the generator then return ##
-        [indent+"currentframe().f_back.f_locals['self.'].close()",line]
+        [indent+"currentframe().f_back.f_locals['self'].close()",line]
     return [line]
 
 def clean_source_lines(source):
@@ -130,9 +148,9 @@ def clean_source_lines(source):
     returns source_lines: list[str],return_linenos: list[int]
 
     1. fixes any indentation issues (when ';' is used) and skips empty lines
-    2. split on "\n" and ";"
+    2. split on "\n", ";", and ":"
     3. join up the line continuations i.e. "\ ... " will be skipped
-
+    
     additionally, custom_adjustment will be called on each line formation as well
     """
     ## setup source as an iterator and making sure the first indentation's correct ##
@@ -160,7 +178,9 @@ def clean_source_lines(source):
                 lines+=[line]
                 number_of_lines+=1
             line="" ## we can't skip whitespace if we do this ##
-        elif char==";":
+        elif char==";" or char==":":
+            if char==":":
+                line+=char
             if line.strip(): ## empty lines are possible ##
                 if get_indent(line) <= reference_indents:
                     line,reference_indents=custom_adjustment(line)
@@ -217,11 +237,11 @@ TODO:
 
 3. make sure inner classes/functions are unaffected - _handle_keywords/_cleaned_source_lines
 
+4. check how gi_running and gi_suspended are actually supposed to be set
 
-
-4. fix anything that creates Generator from attrs since attrs will likely change
-5. test everything (send probably needs to be re thought as well; make sure lineno is correct)
-6. test on async generators
+5. fix anything that creates Generator from attrs since attrs will likely change
+6. test everything (send probably needs to be re thought as well; make sure lineno is correct)
+7. test on async generators
 """
 class Generator(object):
     """
@@ -289,10 +309,10 @@ class Generator(object):
         """
         for pos in self.jump_positions: ## importantly we go from start to finish to capture nesting loops ##
             if self.lineno < pos[0]:
-                return ""
+                return []
             elif self.lineno < pos[1]:
                 return self._source_lines[pos[0]:]
-        return ""
+        return []
 
     def _create_state(self):
         """
@@ -313,11 +333,6 @@ class Generator(object):
         self.reciever=self._set_reciever(lines)
         self.state="\n".join(control_flow_adjust(lines)+self._loop_adjust(lines))
 
-    class frame(object):
-        """acts as the initial FrameType"""
-        f_locals={}
-        f_lineno=0
-
     init="""
     locals().update(f_locals)
     frame=currentframe()
@@ -333,22 +348,27 @@ class Generator(object):
         It goes line by line to find the 
         lines that have the yield statements
         """
-        while self.state and self.lineno not in self.return_linenos:
+        while self.state:
             try:
                 yield self._create_state()
             except StopIteration:
                 break
 
-    def __init__(self,FUNC=None,**attrs):
+    class frame(object):
+        """acts as the initial FrameType"""
+        f_locals={}
+        f_lineno=0
+
+    def __init__(self,FUNC):
         """
         Takes in a function or its source code as the first arguement
 
         Otherwise it takes a dictionary of attributes as the keyword arguements
         """
-        if attrs:
+        if isinstance(FUNC,dict):
             for attr in ("source","gi_code","gi_frame","gi_running","gi_suspended","gi_yieldfrom",
                          "_source_lines","lineno","reciever","state"):
-                setattr(self,attr,attrs[attr])
+                setattr(self,attr,FUNC[attr])
         else:
             ## getsource does work for expressions but it's got no col_offset which is not useful ##
             ## but it may still work with some adjustments (maybe) ##
@@ -490,10 +510,11 @@ if (3,5) <= version_info[:3]:
     get_indent.__annotations__={"line":str,"return":int}
     skip.__annotations__={"iter_val":Iterable,"n":int,"return":None}
     is_alternative_statement.__annotations__={"line":str,"return":bool}
-    ## Generator
-    clean_source_lines.__annotations__={"return":None}
+    extract_iter.__annotations__={"line":str,"return":str}
     custom_adjustment.__annotations__={"return":None}
+    clean_source_lines.__annotations__={"return":None}
     control_flow_adjust.__annotations__={"lines":list[str],"return":list[str]}
+    ## Generator
     Generator._loop_adjust.__annotations__={"lines":list[str],"return":str}
     Generator._set_reciever.__annotations__={"lines":list[str],"return":None}
     Generator._create_state.__annotations__={"lineno":int,"return":None}
