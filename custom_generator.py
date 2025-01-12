@@ -90,10 +90,10 @@ else:
         return line.startswith("elif") or line.startswith("else") or line.startswith("case") or line.startswith("default")
 is_alternative_statement.__doc__="Checks if a line is an alternative statement"
 
-""" 
+"""
 Priority:
  - fix control flow adjust + loop_adjust - you probably need to do the loop adjust first
- - custom_adjust: get the jump positions, adjust for nested for loops
+ - clean_source_lines: get the end jump position
  - set_reciever: think about either parsing or something else
 """
 def extract_iter(line):
@@ -117,7 +117,7 @@ def extract_iter(line):
     ## +1 for 0 based indexing, +1 for whitespace after ##
     return line[index+2:][:-1]
 
-def custom_adjustment(line):
+def custom_adjustment(self,line,lineno):
     """
     It does the following to the source lines:
 
@@ -136,8 +136,9 @@ def custom_adjustment(line):
                 indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
                 indent+"    return currentframe().f_back.f_locals['.i']"]
     elif temp_line.startswith("for "):
-        return [indent+"currentframe().f_back.f_locals['.iter']=(iter(%s),)" % extract_iter(temp_line[4:]),
-                indent+"for i in currentframe().f_back.f_locals['.iter'][0]:"]
+        self.jump_positions+=(lineno,None)
+        return [indent+"currentframe().f_back.f_locals['.iter']=iter(%s)" % extract_iter(temp_line[4:]),
+                indent+"for i in currentframe().f_back.f_locals['.iter']:"]
     elif temp_line.startswith("return "):
         ## close the generator then return ##
         [indent+"currentframe().f_back.f_locals['self'].close()",line]
@@ -235,15 +236,14 @@ def control_flow_adjust(lines):
 """
 TODO:
 1. implement exception formmatter                   - format_exception
-2. handle loops e.g. for + yield from
 
-3. make sure inner classes/functions are unaffected - _handle_keywords/_cleaned_source_lines
+2. make sure inner classes/functions are unaffected - _handle_keywords/_cleaned_source_lines
 
-4. check how gi_running and gi_suspended are actually supposed to be set
+3. check how gi_running and gi_suspended are actually supposed to be set
 
-5. fix anything that creates Generator from attrs since attrs will likely change
-6. test everything (send probably needs to be re thought as well; make sure lineno is correct)
-7. test on async generators
+4. fix anything that creates Generator from attrs since attrs will likely change
+5. test everything (send probably needs to be re thought as well; make sure lineno is correct)
+6. test on async generators
 """
 class Generator(object):
     """
@@ -281,19 +281,6 @@ class Generator(object):
     name function in my_pack.name to get the source code
     if desired.
     """
-    # def _handle_keywords(self,source,index,char,number_of_lines):
-    #     ## handles keywords ##
-    #     temp=self.source[index:]
-    #     ## make sure the definitions are unaffected
-    #     if temp.startswith("def") or temp.startswith("class"):
-    #         reference_indents=get_indent(line)
-    #     if temp.startswith("yield"):
-    #         skip(source,5)
-    #         return "return"
-    #     elif temp.startswith("return"):
-    #         self.return_linenos+=[number_of_lines+1]
-
-    ## need to adjust for the indentation of the control flow blocks ##
 
     def _set_reciever(self,lines):
         """sets the reciever of the generator"""
