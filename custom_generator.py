@@ -92,6 +92,7 @@ is_alternative_statement.__doc__="Checks if a line is an alternative statement"
 
 """ 
 Priority:
+ - fix control flow adjust + loop_adjust - you probably need to do the loop adjust first
  - custom_adjust: get the jump positions, adjust for nested for loops
  - set_reciever: think about either parsing or something else
 """
@@ -103,6 +104,7 @@ def extract_iter(line):
     for ... in ...:
     """
     # 1. get the length of the ids on the left hand side of the "in" keyword
+    ID=""
     for index,char in enumerate(line):
         if char.isalphnum():
             ID+=char
@@ -128,13 +130,13 @@ def custom_adjustment(line):
     indent=" "*number_of_indents
     temp_line=line[number_of_indents:]
     if temp_line.startswith("yield "):
-        return [indent+"return"+temp_line[5:]]
+        return [indent+"return"+temp_line[5:]] ## 5 to retain the whitespace ##
     elif temp_line.startswith("yield from "):
         return [indent+"currentframe().f_back.f_locals['.yieldfrom']="+temp_line[11:],
                 indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
                 indent+"    return currentframe().f_back.f_locals['.i']"]
     elif temp_line.startswith("for "):
-        return [indent+"currentframe().f_back.f_locals['.iter']=(iter(%s),)" % extract_iter(temp_line[3:]),
+        return [indent+"currentframe().f_back.f_locals['.iter']=(iter(%s),)" % extract_iter(temp_line[4:]),
                 indent+"for i in currentframe().f_back.f_locals['.iter'][0]:"]
     elif temp_line.startswith("return "):
         ## close the generator then return ##
