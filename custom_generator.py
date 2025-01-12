@@ -111,6 +111,10 @@ def extract_iter(line):
     ## +1 for 0 based indexing, +1 for whitespace after ##
     return line[index+2:][:-1]
 
+## need to handle continue and break within loop (may need to edit or combine with Generator._loop_adjust) ##
+## continue - stop recording lines
+## break - skip this and carry on make sure
+## we need to deal with nested loop on this one
 def control_flow_adjust(lines):
     """
     removes unreachable control flow blocks that 
@@ -121,8 +125,8 @@ def control_flow_adjust(lines):
     indentation of 4
     """
     init_min=get_indent(lines[0])
-    if init_min != 4:
-        return ""
+    if init_min == 4:
+        return lines
     alternative,new_lines=False,[]
     current_min=init_min
     for line in lines: ## is having no lines possible? This would raise an error ##
@@ -151,14 +155,12 @@ def control_flow_adjust(lines):
 
 """
 TODO:
-1. implement exception formmatter                   - format_exception
-2. make sure inner classes/functions are unaffected - _cleaned_source_lines
-3. check how gi_running and gi_suspended are actually supposed to be set
-4. fix set_reciever: think about either parsing or something else
-
-5. fix anything that creates Generator from attrs since attrs will likely change
-6. test everything (send probably needs to be re thought as well; make sure lineno is correct)
-7. test on async generators
+1. fix the control flow adjusters - continue + break for control_flow_adjust
+2. check whitespace, linenos, attrs, e.g. the smaller details to clean up
+3. try to handle sends with more flexibility for the user e.g. x=yield ... or x=yield from ...
+4. format errors
+5. figure out how gi_running and gi_suspended are actually supposed to be set
+6. write tests
 """
 class Generator(object):
     """
@@ -207,22 +209,30 @@ class Generator(object):
         4. tend to all yield from ... with the same for loop variation
         """
         number_of_indents=get_indent(line)
-        indent=" "*number_of_indents
-        temp_line=line[number_of_indents:]
-        if temp_line.startswith("yield "):
-            return [indent+"return"+temp_line[5:]] ## 5 to retain the whitespace ##
-        elif temp_line.startswith("yield from "):
-            return [indent+"currentframe().f_back.f_locals['.yieldfrom']="+temp_line[11:],
-                    indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
-                    indent+"    return currentframe().f_back.f_locals['.i']"]
-        elif temp_line.startswith("for "):
-            self.jump_positions+=[(lineno,None)]
-            self._jump_stack+=[(number_of_indents,len(self.jump_positions)-1)]
-            return [indent+"currentframe().f_back.f_locals['.iter']=iter(%s)" % extract_iter(temp_line[4:]),
-                    indent+"for i in currentframe().f_back.f_locals['.iter']:"]
-        elif temp_line.startswith("return "):
-            ## close the generator then return ##
-            [indent+"currentframe().f_back.f_locals['self'].close()",line]
+        if self._skip_indent <= number_of_indents: ## skips if greater to avoid definitions ##
+            indent=" "*number_of_indents
+            temp_line=line[number_of_indents:]
+            if temp_line.startswith("def ") or temp_line.startswith("async def ") or temp_line.startswith("class ") or temp_line.startswith("async class "):
+                self._skip_indent=number_of_indents
+            else:
+                self._skip_indent=0
+                if temp_line.startswith("yield "):
+                    return [indent+"return"+temp_line[5:]] ## 5 to retain the whitespace ##
+                elif temp_line.startswith("yield from "):
+                    return [indent+"currentframe().f_back.f_locals['.yieldfrom']="+temp_line[11:],
+                            indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
+                            indent+"    return currentframe().f_back.f_locals['.i']"]
+                elif temp_line.startswith("for "):
+                    self.jump_positions+=[(lineno,None)]
+                    self._jump_stack+=[(number_of_indents,len(self.jump_positions)-1)]
+                    return [indent+"currentframe().f_back.f_locals['.iter']=iter(%s)" % extract_iter(temp_line[4:]),
+                            indent+"for i in currentframe().f_back.f_locals['.iter']:"]
+                elif temp_line.startswith("while "):
+                    self.jump_positions+=[(lineno,None)]
+                    self._jump_stack+=[(number_of_indents,len(self.jump_positions)-1)]
+                elif temp_line.startswith("return "):
+                    ## close the generator then return ##
+                    [indent+"currentframe().f_back.f_locals['self'].close()",line]
         return [line]
 
     def _clean_source_lines(self,source):
@@ -239,7 +249,7 @@ class Generator(object):
         """
         ## setup source as an iterator and making sure the first indentation's correct ##
         source=iter(source[get_indent(source):])
-        line,return_linenos,lines,backslash,instring=" "*4,[],[],False,False
+        line,lines,backslash,instring,indented,space=" "*4,[],False,False,False,0
         ## enumerate since I want the loop to use an iterator but the 
         ## index is needed to retain it for when it's used on get_indent
         for index,char in enumerate(source):
@@ -251,36 +261,42 @@ class Generator(object):
                 ## keep track of backslash ##
                 backslash=(char=="\\")
                 line+=char
+            ## makes the line singly spaced while retaining the indentation ##
+            elif char==" ":
+                if indented:
+                    if space+1!=index:
+                        line+=char
+                else:
+                    line+=char
+                    if space+1!=index:
+                        indented=True
+                space=index
             ## join everything after the line continuation until the next \n or ; ##
             elif char=="\\":
                 skip(source,get_indent(source[index+1:])) ## +1 since index: is inclusive ##
             ## create new line ##
-            elif char=="\n":
-                if line.strip(): ## empty lines are possible ##
-                    reference_indent=get_indent(line)
-                    while reference_indent == self._jump_stack[-1][0]:
-                        pos=self._jump_stack.pop()
-                        reference_indent=pos[0]
-                        self.jump_positions[pos[1]][1]=len(lines)+1
-                    line=self._custom_adjustment(line)
-                    lines+=[line]
-                line="" ## we can't skip whitespace if we do this ##
-            elif char==";" or char==":":
+            elif char in "\n;:":
                 if char==":":
                     line+=char
-                if line.strip(): ## empty lines are possible ##
+                if not line.isspace(): ## empty lines are possible ##
                     reference_indent=get_indent(line)
                     while reference_indent == self._jump_stack[-1][0]:
                         pos=self._jump_stack.pop()
                         reference_indent=pos[0]
                         self.jump_positions[pos[1]][1]=len(lines)+1
-                    line=self._custom_adjustment(line)
-                    lines+=[line]
-                line=" "*4
-                skip(source,get_indent(source[index+1:]))
+                    lines+=self._custom_adjustment(line)
+                if char in ":;":
+                    line=" "*4
+                    skip(source,get_indent(source[index+1:]))
+                else:
+                    line=""
             else:
                 line+=char
-        return lines,return_linenos
+        ## in case you get a for loop at the end ##
+        reference_indent=get_indent(line)
+        while reference_indent == self._jump_stack[-1][0]:
+            self.jump_positions[self._jump_stack.pop()[1]][1]=len(lines)+1
+        return lines
 
     def _set_reciever(self,lines):
         """sets the reciever of the generator"""
@@ -376,8 +392,11 @@ class Generator(object):
             ## for loop adjustments ##
             self.jump_positions=[]
             self._jump_stack=[]
+            self._skip_indent=0
             ## make sure the source code is standardized and usable by this generator ##
-            self._clean_source_lines()
+            self._source_lines=self._clean_source_lines()
+            ## are not used by this generator (was only for formatting source code) ##
+            del self._jump_stack,self._skip_indent
             ## create the states ##
             ## define the state related variables in __init__ to allow the state generator ##
             ## to be independent i.e. when initializing via **attrs ##
