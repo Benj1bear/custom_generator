@@ -90,11 +90,6 @@ else:
         return line.startswith("elif") or line.startswith("else") or line.startswith("case") or line.startswith("default")
 is_alternative_statement.__doc__="Checks if a line is an alternative statement"
 
-"""
-Priority:
- - clean_source_lines: get the end jump position
- - set_reciever: think about either parsing or something else
-"""
 def extract_iter(line):
     """
     Extracts the iterator from a for loop
@@ -157,14 +152,13 @@ def control_flow_adjust(lines):
 """
 TODO:
 1. implement exception formmatter                   - format_exception
-
-2. make sure inner classes/functions are unaffected - _handle_keywords/_cleaned_source_lines
-
+2. make sure inner classes/functions are unaffected - _cleaned_source_lines
 3. check how gi_running and gi_suspended are actually supposed to be set
+4. fix set_reciever: think about either parsing or something else
 
-4. fix anything that creates Generator from attrs since attrs will likely change
-5. test everything (send probably needs to be re thought as well; make sure lineno is correct)
-6. test on async generators
+5. fix anything that creates Generator from attrs since attrs will likely change
+6. test everything (send probably needs to be re thought as well; make sure lineno is correct)
+7. test on async generators
 """
 class Generator(object):
     """
