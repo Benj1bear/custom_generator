@@ -92,7 +92,6 @@ is_alternative_statement.__doc__="Checks if a line is an alternative statement"
 
 """
 Priority:
- - fix control flow adjust + loop_adjust - you probably need to do the loop adjust first
  - clean_source_lines: get the end jump position
  - set_reciever: think about either parsing or something else
 """
@@ -116,84 +115,6 @@ def extract_iter(line):
     # 3. remove the end colon
     ## +1 for 0 based indexing, +1 for whitespace after ##
     return line[index+2:][:-1]
-
-def custom_adjustment(self,line,lineno):
-    """
-    It does the following to the source lines:
-
-    1. replace all lines that start with yields with returns to start with
-    2. make sure the generator is closed on regular returns
-    3. save the iterator from the for loops replacing with a nonlocal variation
-    4. tend to all yield from ... with the same for loop variation
-    """
-    number_of_indents=get_indent(line)
-    indent=" "*number_of_indents
-    temp_line=line[number_of_indents:]
-    if temp_line.startswith("yield "):
-        return [indent+"return"+temp_line[5:]] ## 5 to retain the whitespace ##
-    elif temp_line.startswith("yield from "):
-        return [indent+"currentframe().f_back.f_locals['.yieldfrom']="+temp_line[11:],
-                indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
-                indent+"    return currentframe().f_back.f_locals['.i']"]
-    elif temp_line.startswith("for "):
-        self.jump_positions+=(lineno,None)
-        return [indent+"currentframe().f_back.f_locals['.iter']=iter(%s)" % extract_iter(temp_line[4:]),
-                indent+"for i in currentframe().f_back.f_locals['.iter']:"]
-    elif temp_line.startswith("return "):
-        ## close the generator then return ##
-        [indent+"currentframe().f_back.f_locals['self'].close()",line]
-    return [line]
-
-def clean_source_lines(source):
-    """
-    source: str
-
-    returns source_lines: list[str],return_linenos: list[int]
-
-    1. fixes any indentation issues (when ';' is used) and skips empty lines
-    2. split on "\n", ";", and ":"
-    3. join up the line continuations i.e. "\ ... " will be skipped
-    
-    additionally, custom_adjustment will be called on each line formation as well
-    """
-    ## setup source as an iterator and making sure the first indentation's correct ##
-    source=iter(source[get_indent(source):])
-    line,return_linenos,lines,backslash,instring,number_of_lines,reference_indents=" "*4,[],[],False,False,0,4
-    ## enumerate since I want the loop to use an iterator but the 
-    ## index is needed to retain it for when it's used on get_indent
-    for index,char in enumerate(source):
-        ## skip strings ##
-        if char=="'" or char=='"' and not backslash:
-            instring=(instring + 1) % 2
-            line+=char
-        elif instring:
-            ## keep track of backslash ##
-            backslash=(char=="\\")
-            line+=char
-        ## join everything after the line continuation until the next \n or ; ##
-        elif char=="\\":
-            skip(source,get_indent(source[index+1:])) ## +1 since index: is inclusive ##
-        ## create new line ##
-        elif char=="\n":
-            if line.strip(): ## empty lines are possible ##
-                if get_indent(line) <= reference_indents: ## translate keywords for this generator ##
-                    line,reference_indents=custom_adjustment(line)
-                lines+=[line]
-                number_of_lines+=1
-            line="" ## we can't skip whitespace if we do this ##
-        elif char==";" or char==":":
-            if char==":":
-                line+=char
-            if line.strip(): ## empty lines are possible ##
-                if get_indent(line) <= reference_indents:
-                    line,reference_indents=custom_adjustment(line)
-                lines+=[line]
-                number_of_lines+=1
-            line=" "*4
-            skip(source,get_indent(source[index+1:]))
-        else:
-            line+=char
-    return lines,return_linenos
 
 def control_flow_adjust(lines):
     """
@@ -282,6 +203,91 @@ class Generator(object):
     if desired.
     """
 
+    def _custom_adjustment(self,line,lineno):
+        """
+        It does the following to the source lines:
+
+        1. replace all lines that start with yields with returns to start with
+        2. make sure the generator is closed on regular returns
+        3. save the iterator from the for loops replacing with a nonlocal variation
+        4. tend to all yield from ... with the same for loop variation
+        """
+        number_of_indents=get_indent(line)
+        indent=" "*number_of_indents
+        temp_line=line[number_of_indents:]
+        if temp_line.startswith("yield "):
+            return [indent+"return"+temp_line[5:]] ## 5 to retain the whitespace ##
+        elif temp_line.startswith("yield from "):
+            return [indent+"currentframe().f_back.f_locals['.yieldfrom']="+temp_line[11:],
+                    indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
+                    indent+"    return currentframe().f_back.f_locals['.i']"]
+        elif temp_line.startswith("for "):
+            self.jump_positions+=[(lineno,None)]
+            self._jump_stack+=[(number_of_indents,len(self.jump_positions)-1)]
+            return [indent+"currentframe().f_back.f_locals['.iter']=iter(%s)" % extract_iter(temp_line[4:]),
+                    indent+"for i in currentframe().f_back.f_locals['.iter']:"]
+        elif temp_line.startswith("return "):
+            ## close the generator then return ##
+            [indent+"currentframe().f_back.f_locals['self'].close()",line]
+        return [line]
+
+    def _clean_source_lines(self,source):
+        """
+        source: str
+
+        returns source_lines: list[str],return_linenos: list[int]
+
+        1. fixes any indentation issues (when ';' is used) and skips empty lines
+        2. split on "\n", ";", and ":"
+        3. join up the line continuations i.e. "\ ... " will be skipped
+        
+        additionally, custom_adjustment will be called on each line formation as well
+        """
+        ## setup source as an iterator and making sure the first indentation's correct ##
+        source=iter(source[get_indent(source):])
+        line,return_linenos,lines,backslash,instring=" "*4,[],[],False,False
+        ## enumerate since I want the loop to use an iterator but the 
+        ## index is needed to retain it for when it's used on get_indent
+        for index,char in enumerate(source):
+            ## skip strings ##
+            if char=="'" or char=='"' and not backslash:
+                instring=(instring + 1) % 2
+                line+=char
+            elif instring:
+                ## keep track of backslash ##
+                backslash=(char=="\\")
+                line+=char
+            ## join everything after the line continuation until the next \n or ; ##
+            elif char=="\\":
+                skip(source,get_indent(source[index+1:])) ## +1 since index: is inclusive ##
+            ## create new line ##
+            elif char=="\n":
+                if line.strip(): ## empty lines are possible ##
+                    reference_indent=get_indent(line)
+                    while reference_indent == self._jump_stack[-1][0]:
+                        pos=self._jump_stack.pop()
+                        reference_indent=pos[0]
+                        self.jump_positions[pos[1]][1]=len(lines)+1
+                    line=self._custom_adjustment(line)
+                    lines+=[line]
+                line="" ## we can't skip whitespace if we do this ##
+            elif char==";" or char==":":
+                if char==":":
+                    line+=char
+                if line.strip(): ## empty lines are possible ##
+                    reference_indent=get_indent(line)
+                    while reference_indent == self._jump_stack[-1][0]:
+                        pos=self._jump_stack.pop()
+                        reference_indent=pos[0]
+                        self.jump_positions[pos[1]][1]=len(lines)+1
+                    line=self._custom_adjustment(line)
+                    lines+=[line]
+                line=" "*4
+                skip(source,get_indent(source[index+1:]))
+            else:
+                line+=char
+        return lines,return_linenos
+
     def _set_reciever(self,lines):
         """sets the reciever of the generator"""
         if self.gi_running:
@@ -290,7 +296,7 @@ class Generator(object):
             if line[:5]=='Send(' and (self.gi_frame.f_locals.get("Send",None)==Send or globals().get("Send",None)==Send):
                 return collect_string(line[11:])
 
-    def _loop_adjust(self):
+    def _loop_adjust(self,lines):
         """
         adjusts source code about control flow statements
         so that it can be used in a single directional flow
@@ -298,10 +304,10 @@ class Generator(object):
         """
         for pos in self.jump_positions: ## importantly we go from start to finish to capture nesting loops ##
             if self.lineno < pos[0]:
-                return []
+                return control_flow_adjust(lines)
             elif self.lineno < pos[1]:
-                return self._source_lines[pos[0]:]
-        return []
+                return control_flow_adjust(lines[:pos[1]]) + self._source_lines[pos[0]:]
+        return control_flow_adjust(lines)
 
     def _create_state(self):
         """
@@ -320,7 +326,7 @@ class Generator(object):
         lines=self._source_lines[self.lineno:]
         ## used on .send (shouldn't be modified by the user)
         self.reciever=self._set_reciever(lines)
-        self.state="\n".join(control_flow_adjust(lines)+self._loop_adjust(lines))
+        self.state="\n".join(self._loop_adjust(lines))
 
     init="""
     locals().update(f_locals)
@@ -373,6 +379,9 @@ class Generator(object):
                 self.source=getsource(FUNC.gi_code)
                 self.gi_code=FUNC.gi_code
                 self.gi_frame=FUNC.gi_frame
+            ## for loop adjustments ##
+            self.jump_positions=[]
+            self._jump_stack=[]
             ## make sure the source code is standardized and usable by this generator ##
             self._clean_source_lines()
             ## create the states ##
@@ -500,10 +509,10 @@ if (3,5) <= version_info[:3]:
     skip.__annotations__={"iter_val":Iterable,"n":int,"return":None}
     is_alternative_statement.__annotations__={"line":str,"return":bool}
     extract_iter.__annotations__={"line":str,"return":str}
-    custom_adjustment.__annotations__={"return":None}
-    clean_source_lines.__annotations__={"return":None}
     control_flow_adjust.__annotations__={"lines":list[str],"return":list[str]}
     ## Generator
+    Generator._custom_adjustment.__annotations__={"return":None}
+    Generator._clean_source_lines.__annotations__={"return":None}
     Generator._loop_adjust.__annotations__={"lines":list[str],"return":str}
     Generator._set_reciever.__annotations__={"lines":list[str],"return":None}
     Generator._create_state.__annotations__={"lineno":int,"return":None}
