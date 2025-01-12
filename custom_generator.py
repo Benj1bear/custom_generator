@@ -155,7 +155,22 @@ def control_flow_adjust(lines):
 
 """
 TODO:
-1. fix the control flow adjusters - continue + break for control_flow_adjust
+1. fix the control flow adjusters - continue + break for control_flow_adjust and then nested loops
+    
+     - e.g. if a continue or break is encountered:
+       add:
+       while True: (to the top)
+           break   (to the bottom)
+       
+     - if encountered a break make sure to set it to an empty iterable e.g. '()' 
+
+     - if doing recursion make sure the function is called as i.e.:
+       Generator(FUNC())
+       
+       Though, I think it's better to change its reference to the Generator object to prevent this
+
+     - Then I'll need to handle nested loops
+
 2. check whitespace, linenos, attrs, e.g. the smaller details to clean up
 3. try to handle sends with more flexibility for the user e.g. x=yield ... or x=yield from ...
 4. format errors
@@ -292,10 +307,11 @@ class Generator(object):
                     line=""
             else:
                 line+=char
-        ## in case you get a for loop at the end ##
-        reference_indent=get_indent(line)
-        while reference_indent == self._jump_stack[-1][0]:
-            self.jump_positions[self._jump_stack.pop()[1]][1]=len(lines)+1
+        if self._jump_stack:
+            ## in case you get a for loop at the end ##
+            reference_indent=get_indent(line)
+            while reference_indent == self._jump_stack[-1][0]:
+                self.jump_positions[self._jump_stack.pop()[1]][1]=len(lines)+1
         return lines
 
     def _set_reciever(self,lines):
