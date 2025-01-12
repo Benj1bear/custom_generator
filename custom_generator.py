@@ -309,9 +309,9 @@ class Generator(object):
                 line+=char
         if self._jump_stack:
             ## in case you get a for loop at the end ##
-            reference_indent=get_indent(line)
-            while reference_indent == self._jump_stack[-1][0]:
-                self.jump_positions[self._jump_stack.pop()[1]][1]=len(lines)+1
+            for reference_indent in range(get_indent(line),0,-4):
+                if reference_indent == self._jump_stack[-1][0]:
+                    self.jump_positions[self._jump_stack.pop()[1]][1]=len(lines)+1
         return lines
 
     def _set_reciever(self,lines):
