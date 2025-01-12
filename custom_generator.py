@@ -107,18 +107,20 @@ def custom_adjustment(line):
     4. tend to all yield from ... with for loops
     """
     number_of_indents=get_indent(line)
+    indent=" "*number_of_indents
     temp_line=line[number_of_indents:]
-    if temp_line.startswith("yield from "):
-        number_of_indents=" "*number_of_indents
-        return [number_of_indents+"currentframe().f_back.f_locals['.yieldfrom']="+temp_line[11:],
-                number_of_indents+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
-                number_of_indents+"    return currentframe().f_back.f_locals['.i']"]
+    if temp_line.startswith("yield "):
+        return [indent+"return"+temp_line[5:]]
+    elif temp_line.startswith("yield from "):
+        return [indent+"currentframe().f_back.f_locals['.yieldfrom']="+temp_line[11:],
+                indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
+                indent+"    return currentframe().f_back.f_locals['.i']"]
     elif temp_line.startswith("for "):
-        return ["currentframe().f_back.f_locals['.iter']=(iter(range(3)),iter(range(3)))",
-                "for i in currentframe().f_back.f_locals['.iter'][0]:"]
+        return [indent+"currentframe().f_back.f_locals['.iter']=(iter(range(3)),iter(range(3)))",
+                indent+"for i in currentframe().f_back.f_locals['.iter'][0]:"]
     elif temp_line.startswith("return "):
         ## close the generator then return ##
-        ["currentframe().f_back.f_locals['self.'].close()",line]
+        [indent+"currentframe().f_back.f_locals['self.'].close()",line]
     return [line]
 
 def clean_source_lines(source):
@@ -490,9 +492,9 @@ if (3,5) <= version_info[:3]:
     is_alternative_statement.__annotations__={"line":str,"return":bool}
     ## Generator
     clean_source_lines.__annotations__={"return":None}
-    custom_adjust.__annotations__={"return":None}
+    custom_adjustment.__annotations__={"return":None}
     control_flow_adjust.__annotations__={"lines":list[str],"return":list[str]}
-    loop_adjust.__annotations__={"lines":list[str],"return":str}
+    Generator._loop_adjust.__annotations__={"lines":list[str],"return":str}
     Generator._set_reciever.__annotations__={"lines":list[str],"return":None}
     Generator._create_state.__annotations__={"lineno":int,"return":None}
     Generator.init_states.__annotations__={"return":None}
