@@ -111,10 +111,6 @@ def extract_iter(line):
     ## +1 for 0 based indexing, +1 for whitespace after ##
     return line[index+2:][:-1]
 
-## need to handle continue and break within loop (may need to edit or combine with Generator._loop_adjust) ##
-## continue - stop recording lines
-## break - skip this and carry on make sure
-## we need to deal with nested loop on this one
 def control_flow_adjust(lines):
     """
     removes unreachable control flow blocks that 
@@ -172,21 +168,33 @@ def temporary_loop_adjust(line):
         return [indent+"locals()['.continue']=False",indent+"break"]
     return " "*4+line
 
+def send_adjust(line):
+    flag=0
+    parts=line.split("=")
+    for index,node in enumerate(parts):
+        if not node.isalnum(): ## makes sure we're assigning to a variable ##
+            break
+        if "yield from " in node:
+            flag=1
+            break
+        if "yield" in node:
+            flag=2
+            break
+    if flag:
+        return flag,["=".join(parts[index:]),"=".join(parts[:index])+"=locals()['.send']"]
+    return None,None
+
 class frame(object):
     """acts as the initial FrameType"""
-    f_locals={}
+    f_locals={".send":None}
     f_lineno=0
 
 """
 TODO:
-1. have an option to set the reference to Generator(FUNC)
-   so that recursion is of the same function
-
-2. check whitespace, linenos, attrs, e.g. the smaller details to clean up
-3. try to handle sends with more flexibility for the user e.g. x=yield ... or x=yield from ...
-4. format errors
-5. figure out how gi_running and gi_suspended are actually supposed to be set
-6. write tests
+1. check whitespace, linenos, attrs, e.g. the smaller details to clean up
+2. format errors
+3. figure out how gi_running and gi_suspended are actually supposed to be set
+4. write tests
 """
 class Generator(object):
     """
@@ -242,12 +250,12 @@ class Generator(object):
                 self._skip_indent=number_of_indents
             else:
                 self._skip_indent=0
-                if temp_line.startswith("yield "):
-                    return [indent+"return"+temp_line[5:]] ## 5 to retain the whitespace ##
-                elif temp_line.startswith("yield from "):
+                if temp_line.startswith("yield from "):
                     return [indent+"currentframe().f_back.f_locals['.yieldfrom']="+temp_line[11:],
                             indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
                             indent+"    return currentframe().f_back.f_locals['.i']"]
+                elif temp_line.startswith("yield "):
+                    return [indent+"return"+temp_line[5:]] ## 5 to retain the whitespace ##
                 elif temp_line.startswith("for "):
                     self.jump_positions+=[(lineno,None)]
                     self._jump_stack+=[(number_of_indents,len(self.jump_positions)-1)]
@@ -259,6 +267,15 @@ class Generator(object):
                 elif temp_line.startswith("return "):
                     ## close the generator then return ##
                     [indent+"currentframe().f_back.f_locals['self'].close()",line]
+                ## handles the .send method ##
+                flag,adjustment=send_adjust(line)
+                if flag:
+                    if flag==1:
+                        return [indent+"return"+adjustment[0][5:]]+adjustment[1]
+                    else:
+                        return [indent+"currentframe().f_back.f_locals['.yieldfrom']="+adjustment[0][11:],
+                                indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
+                                indent+"    return currentframe().f_back.f_locals['.i']"]+adjustment[1]
         return [line]
 
     def _clean_source_lines(self,source):
@@ -325,13 +342,13 @@ class Generator(object):
                     self.jump_positions[self._jump_stack.pop()[1]][1]=len(lines)+1
         return lines
 
-    def _set_reciever(self,lines):
-        """sets the reciever of the generator"""
-        if self.gi_running:
-            line=lines[0]
-            # as long as it's 'Send(' and Send is Send e.g. locally or globally defined and is correct
-            if line[:5]=='Send(' and (self.gi_frame.f_locals.get("Send",None)==Send or globals().get("Send",None)==Send):
-                return collect_string(line[11:])
+    # def _set_reciever(self,lines):
+    #     """sets the reciever of the generator"""
+    #     if self.gi_running:
+    #         line=lines[0]
+    #         # as long as it's 'Send(' and Send is Send e.g. locally or globally defined and is correct
+    #         if line[:5]=='Send(' and (self.gi_frame.f_locals.get("Send",None)==Send or globals().get("Send",None)==Send):
+    #             return collect_string(line[11:])
 
     def _loop_adjust(self,lines):
         """
@@ -410,7 +427,7 @@ class Generator(object):
             except StopIteration:
                 break
 
-    def __init__(self,FUNC):
+    def __init__(self,FUNC,overwrite=False):
         """
         Takes in a function or its source code as the first arguement
 
@@ -455,6 +472,11 @@ class Generator(object):
             self.gi_frame.f_lineno=self.init_len # is this necessary??
             ############################################################
         self.state_generator=self.init_states()
+        if overwrite:
+            if hasattr(FUNC,"__code__"):
+                currentframe().f_back.f_locals[FUNC.__code__.co_name]=self
+            else:
+                currentframe().f_back.f_locals[FUNC.gi_code.co_name]=self
 
     def __len__(self):
         """
@@ -500,32 +522,29 @@ class Generator(object):
         try: # get the locals dict, update the line position, and return the result
             return locals()["next_state"](self.gi_frame.f_locals)
         except Exception as e: ## we should format the exception as it normally would be formmated ideally
-            self._format_exception(e)
+            self.throw(e)
 
     def send(self,arg):
         """
         Send takes exactly one arguement 'arg' that 
         is sent to the functions yield variable
         """
+        if self.gi_yieldfrom:
+            return self.gi_yieldfrom.send(arg)
         if not self.gi_running:
             raise TypeError("can't send non-None value to a just-started generator")
         if self.reciever:
-            self.gi_frame.f_locals()[self.reciever]=arg
+            self.gi_frame.f_locals()[".send"]=arg
         return next(self)
 
     def close(self):
         """Creates a simple empty generator"""
-        self.state_generator=(None for i in ())
+        self.state_generator=iter(())
         self.gi_frame=None
         self.gi_running=False
         self.gi_suspended=False
 
     def throw(self,exception):
-        """Throws an error at the current line of execution in the function"""
-        # get the current position (should be recorded and updated after every execution)
-        self._format_exception(exception)
-
-    def _format_exception(self,exception):
         """Raises an exception from the last line in the current state e.g. only from what has been"""
         raise exception
 
@@ -571,6 +590,7 @@ if (3,5) <= version_info[:3]:
     extract_iter.__annotations__={"line":str,"return":str}
     control_flow_adjust.__annotations__={"lines":list[str],"return":list[str]}
     temporary_loop_adjust.__annotations__={"line":str,"return":list[str]}
+    send_adjust.__annotations__={"line":str,"return":tuple[None|int,None|list[str,str]]}
     ## Generator
     Generator._custom_adjustment.__annotations__={"line":str,"lineno":int,"return":list[str]}
     Generator._clean_source_lines.__annotations__={"source":str,"return":list[str]}
@@ -584,8 +604,7 @@ if (3,5) <= version_info[:3]:
     Generator.__next__.__annotations__={"return":Any}
     Generator.send.__annotations__={"arg":Any,"return":Any}
     Generator.close.__annotations__={"return":None}
-    Generator.throw.__annotations__={"exception":Exception,"return":None}
-    Generator._format_exception.__annotations__={"exception":Exception,"return":NoReturn}
+    Generator.throw.__annotations__={"exception":Exception,"return":NoReturn}
     Generator._copier.__annotations__={"FUNC":Callable,"return":Generator}
     Generator.__copy__.__annotations__={"return":Generator}
     Generator.__deepcopy__.__annotations__={"memo":dict,"return":Generator}
