@@ -32,40 +32,6 @@ from sys import version_info
 if version_info < (3,):
     range = xrange
 
-## this needs to be checked ##
-class Send(object):
-    """
-    Special class specifically used in combination with Generator
-    to signal where and what to send
-    
-    Note: Send should only be used after a yield statement and not
-    anywhere else. If used elsewhere or no variable has been sent 
-    it will have no effect conceptually.
-    """
-    def __init__(self,ID):
-        if not ID.isalnum():
-            raise ValueError("ID must be alpha numeric e.g. ID.isalnum() should return True")
-        self.ID=ID
-
-    def __repr__(self):
-        return "Send('%s')" % self.ID
-
-def collect_string(line):
-    """collects a string from a string"""
-    if line[0]!="'" or line[0]!='"':
-        raise ValueError("'Send' must be given exactly one arguement of type 'str'")
-    string=""
-    reference_char=line[0]
-    line=iter(line)
-    for char in line:
-        string+=char
-        if char=="\\":
-            next(line)
-            continue
-        if char==reference_char:
-            break
-    return string
-
 def get_indent(line):
     """Gets the number of spaces used in an indentation"""
     count=0
@@ -172,13 +138,14 @@ def send_adjust(line):
     flag=0
     parts=line.split("=")
     for index,node in enumerate(parts):
-        if not node.isalnum(): ## makes sure we're assigning to a variable ##
-            break
-        if "yield from " in node:
+        node=node[get_indent(node):]
+        if node.startswith("yield from "):
             flag=1
             break
-        if "yield" in node:
+        if node.startswith("yield "):
             flag=2
+            break
+        if not node.isalnum(): ## makes sure we're assigning to a variable ##
             break
     if flag:
         return flag,["=".join(parts[index:]),"=".join(parts[:index])+"=locals()['.send']"]
@@ -193,8 +160,8 @@ class frame(object):
 TODO:
 1. check whitespace, linenos, attrs, e.g. the smaller details to clean up
 2. format errors
-3. figure out how gi_running and gi_suspended are actually supposed to be set
-4. write tests
+3. write tests
+4. make an asynchronous verion? async generators have different attrs i.e. gi_frame is ag_frame
 """
 class Generator(object):
     """
@@ -278,7 +245,7 @@ class Generator(object):
                                 indent+"    return currentframe().f_back.f_locals['.i']"]+adjustment[1]
         return [line]
 
-    def _clean_source_lines(self,source):
+    def _clean_source_lines(self):
         """
         source: str
 
@@ -290,8 +257,10 @@ class Generator(object):
         
         additionally, custom_adjustment will be called on each line formation as well
         """
+        ## for loop adjustments ##
+        self.jump_positions,self._jump_stack,self._skip_indent=[],[],0
         ## setup source as an iterator and making sure the first indentation's correct ##
-        source=enumerate(source[get_indent(source):])
+        source=enumerate(self.source[get_indent(source):])
         line,lines,backslash,instring,indented,space=" "*4,[],False,False,False,0
         ## enumerate since I want the loop to use an iterator but the 
         ## index is needed to retain it for when it's used on get_indent
@@ -340,15 +309,9 @@ class Generator(object):
             for reference_indent in range(get_indent(line),0,-4):
                 if reference_indent == self._jump_stack[-1][0]:
                     self.jump_positions[self._jump_stack.pop()[1]][1]=len(lines)+1
+        ## are not used by this generator (was only for formatting source code) ##
+        del self._jump_stack,self._skip_indent
         return lines
-
-    # def _set_reciever(self,lines):
-    #     """sets the reciever of the generator"""
-    #     if self.gi_running:
-    #         line=lines[0]
-    #         # as long as it's 'Send(' and Send is Send e.g. locally or globally defined and is correct
-    #         if line[:5]=='Send(' and (self.gi_frame.f_locals.get("Send",None)==Send or globals().get("Send",None)==Send):
-    #             return collect_string(line[11:])
 
     def _loop_adjust(self,lines):
         """
@@ -384,7 +347,7 @@ class Generator(object):
                     ## we do it this way since you can get [...,...] which won't work as a list comprehension ##
                     current_code+=temporary_loop_adjust(line)
                 current_code=["while True:"]+current_code+[" "*4+"break"]
-                return current_code+loops
+                return "\n".join(current_code+loops)
         return "\n".join(control_flow_adjust(lines))
 
     def _create_state(self):
@@ -404,11 +367,11 @@ class Generator(object):
         lines=self._source_lines[self.lineno:]
         ## used on .send (shouldn't be modified by the user)
         self.reciever=self._set_reciever(lines)
-        self.state="\n".join(self._loop_adjust(lines))
+        self.state=self._loop_adjust(lines)
 
     ## try not to use variables here (otherwise it can mess with the state) ##
     init="""
-    locals().update(f_locals)
+    locals().update(currentframe().f_back.f_locals['self'].gi_frame.f_locals)
     currentframe().f_back.f_locals['self'].gi_frame=currentframe()
     ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(currentframe().f_back), ctypes.c_int(0))
 """
@@ -432,45 +395,49 @@ class Generator(object):
         Takes in a function or its source code as the first arguement
 
         Otherwise it takes a dictionary of attributes as the keyword arguements
+
+        Note:
+         - gi_running: is the generator currently being executed
+         - gi_suspended: is the generator currently paused e.g. state is saved
+
         """
         if isinstance(FUNC,dict):
             for attr in ("source","gi_code","gi_frame","gi_running","gi_suspended","gi_yieldfrom",
-                         "_source_lines","lineno","reciever","state"):
+                         "_source_lines","lineno","state"):
                 setattr(self,attr,FUNC[attr])
+        elif hasattr(FUNC,"gi_code"): ## an initialized generator ##
+            self.source=getsource(FUNC.gi_code)
+            self._source_lines=self._clean_source_lines()
+            self.gi_code=FUNC.gi_code
+            self.gi_frame=FUNC.gi_frame
+            ## gi_yieldfrom was introduced in python version 3.5 ##
+            if hasattr(FUNC,"gi_yieldfrom"):
+                self.gi_yieldfrom=FUNC.gi_yieldfrom
+            else:
+                self.gi_yieldfrom=None
+            self.gi_suspended=True
         else:
             ## getsource does work for expressions but it's got no col_offset which is not useful ##
             ## but it may still work with some adjustments (maybe) ##
             if isinstance(FUNC,str): ## from source code ##
                 self.source=FUNC
                 self.gi_code=compile(FUNC,"","eval")
-                self.gi_frame=frame()
             elif isinstance(FUNC,FunctionType): ## a generator function ##
                 self.source=getsource(FUNC)
                 self.gi_code=FUNC.__code__
-                self.gi_frame=frame()
-            else: ## an initialized generator ##
-                self.source=getsource(FUNC.gi_code)
-                self.gi_code=FUNC.gi_code
-                self.gi_frame=FUNC.gi_frame
-            ## for loop adjustments ##
-            self.jump_positions=[]
-            self._jump_stack=[]
-            self._skip_indent=0
             ## make sure the source code is standardized and usable by this generator ##
             self._source_lines=self._clean_source_lines()
-            ## are not used by this generator (was only for formatting source code) ##
-            del self._jump_stack,self._skip_indent
             ## create the states ##
-            ## define the state related variables in __init__ to allow the state generator ##
-            ## to be independent i.e. when initializing via **attrs ##
-            self.gi_running=False
+            self.gi_frame=frame()
             self.gi_suspended=False
-            ## indicates what iterable is being yield from when the yield is a yield from (introduced in python version 3.3) ##
+            ## indicates what iterable is being yield from ##
+            ## when the yield is a yield from (introduced in python version 3.3) ##
             self.gi_yieldfrom=None
             ############################################################
             self.lineno=0 ## the current line number relative to self._source_lines ##
             self.gi_frame.f_lineno=self.init_len # is this necessary??
             ############################################################
+        self.gi_running=False
         self.state_generator=self.init_states()
         if overwrite:
             if hasattr(FUNC,"__code__"):
@@ -513,14 +480,13 @@ class Generator(object):
         """
         # set the next state and setup the function
         next(self.state_generator) ## it will raise a StopIteration for us
-        # if not set already
-        if not self.gi_running:
-            self.gi_running=True ## apparently i.e. yield from range(...) changes this to False ##
-            self.gi_suspended=True
         ## update with the new state and get the frame ##
-        exec("def next_state(f_locals):"+self.init+self.state,globals(),locals())
+        exec("def next_state():"+self.init+self.state,globals(),locals())
         try: # get the locals dict, update the line position, and return the result
-            return locals()["next_state"](self.gi_frame.f_locals)
+            self.gi_running=True
+            result=locals()["next_state"]()
+            self.gi_running=False
+            return result
         except Exception as e: ## we should format the exception as it normally would be formmated ideally
             self.throw(e)
 
@@ -579,11 +545,7 @@ class Generator(object):
 if (3,5) <= version_info[:3]:
     from typing import Callable,Any,NoReturn,Iterable
     import types
-    ## Send
-    Send.__init__.__annotations__={"ID":str,"return":None}
-    Send.__repr__.__annotations__={"return":str}
     ## utility functions
-    collect_string.__annotations__={"line":str,"return":str}
     get_indent.__annotations__={"line":str,"return":int}
     skip.__annotations__={"iter_val":Iterable,"n":int,"return":None}
     is_alternative_statement.__annotations__={"line":str,"return":bool}
