@@ -153,64 +153,20 @@ def control_flow_adjust(lines):
             new_lines+=[line]
     return new_lines
 
+def temporary_loop_adjust(line,current_iter):
+    indent=get_indent(line)
+    temp=line[indent:]
+    indent=" "*(indent+4) ## +4 since it's in a newly created block ##
+    if temp.startswith("continue"):
+        return indent+"break"
+    elif temp.startswith("break"):
+        return [indent+"locals()['.continue']=False",indent+"break"]
+    return line
+
 """
 TODO:
-1. fix the control flow adjusters - continue + break for control_flow_adjust and then nested loops
-    
-     - i.e.:
-        To demonstrate what needs to be done for control flow + loop adjusters
-        
-        If this is the current state:
-
-        for 
-            for
-                ...
-                for 
-                    ...
-                    yield ...
-                    ...
-                ... 
-        ...
-        ...
-
-        Then it needs to becom:
-        
-        # (code left to be executed from the current for loop)
-        while True:
-            ...
-            break
-        # (finish the current for loop)
-        for 
-            ...
-            yield ...
-            ...
-        ... 
-        # (finish the next outer for loop)
-        for
-            ...
-            for 
-                ...
-                yield ...
-                ...
-            ... 
-        # (finish the next outer for loop)
-        for 
-            for
-                ...
-                for 
-                    ...
-                    yield ...
-                    ...
-                ... 
-        ...
-        ...
-    Thus, for the current code section:
-    
-    continue -> break;
-    break -> set the iter in the current for loop to an empty iter; break;
-
-    - have an option to set the reference to Generator(FUNC) 
-      so that recursion is of the same function
+1. have an option to set the reference to Generator(FUNC)
+   so that recursion is of the same function
 
 2. check whitespace, linenos, attrs, e.g. the smaller details to clean up
 3. try to handle sends with more flexibility for the user e.g. x=yield ... or x=yield from ...
@@ -369,11 +325,29 @@ class Generator(object):
         so that it can be used in a single directional flow
         as the generators states
         """
-        for pos in self.jump_positions: ## importantly we go from start to finish to capture nesting loops ##
+        positions=iter(self.jump_positions)
+        for pos in positions: ## importantly we go from start to finish to capture nesting loops ##
             if self.lineno < pos[0]:
                 return control_flow_adjust(lines)
             elif self.lineno < pos[1]:
-                return control_flow_adjust(lines[:pos[1]]) + self._source_lines[pos[0]:]
+                ## handle nested loops ##
+                end_pos=pos[1]
+                loops=[self._source_lines[pos[0]:]]
+                for pos in positions:
+                    if self.lineno >= pos[1]:
+                        break
+                    loops+=[self._source_lines[pos[0]:pos[1]]]
+                    # new_state="\n".join(temp)+"\n"+new_state
+                ## make sure the break statement adjustment can work ##
+                loops[-1]=["if locals()['.continue']:"]+[" "*4+line for line in loops[-1]]
+                loops="\n".join("\n".join(loop) for loop in loops)
+                ## adjust the current code block then return the combined result ##
+                current_code=[]
+                for line in control_flow_adjust(lines[:end_pos]):
+                    ## we do it this way since you can get [...,...] which won't work as a list comprehension ##
+                    current_code+=temporary_loop_adjust(line)
+                current_code=["while True:"]+current_code+[" "*4+"break"]
+                return current_code+loops
         return control_flow_adjust(lines)
 
     def _create_state(self):
