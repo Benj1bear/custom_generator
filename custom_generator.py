@@ -158,10 +158,14 @@ class frame(object):
 
 """
 TODO:
-1. check whitespace, linenos, attrs, e.g. the smaller details to clean up
-2. format errors
-3. write tests
-4. make an asynchronous verion? async generators have different attrs i.e. gi_frame is ag_frame
+1. think about getsource in relation to generator expressions that sometimes   - __init__
+   don't get their source retrieved and if there's also a col_offset
+2. fix for running generators                                                  - __init__
+3. check whitespace, linenos, attrs, e.g. the smaller details to clean up      - _clean_source_lines and others involved in _create_state
+4. format errors                                                               - throw
+5. write tests
+6. make an asynchronous verion? async generators have different attrs i.e. gi_frame is ag_frame
+ - maybe make a preprocessor to rewrite some of the functions in Generator for ease of development
 """
 class Generator(object):
     """
@@ -407,6 +411,10 @@ class Generator(object):
                 setattr(self,attr,FUNC[attr])
         elif hasattr(FUNC,"gi_code"): ## an initialized generator ##
             self.source=getsource(FUNC.gi_code)
+            # i.e. get the running line + col_offset (since the source code is can likely be not well formatted)
+            self.source=self.source.split("\n")[FUNC.gi_frame.f_lineno-FUNC.gi_code.co_firstlineno:]
+            self.source[0]=self.source[0][col_offset:]
+            self.source="\n".join(self.source)
             self._source_lines=self._clean_source_lines()
             self.gi_code=FUNC.gi_code
             self.gi_frame=FUNC.gi_frame
