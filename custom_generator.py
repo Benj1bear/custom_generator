@@ -23,7 +23,7 @@ For python 2:
 """
 
 from types import FunctionType
-from inspect import getsource,currentframe
+from inspect import getsource,currentframe,findsource
 import ctypes
 from copy import deepcopy,copy
 from sys import version_info
@@ -156,15 +156,114 @@ class frame(object):
     f_locals={".send":None}
     f_lineno=0
 
+def code_attrs():
+    """
+    all the attrs used by a CodeType object in 
+    order of types.CodeTypes function signature 
+    ideally and correct to the current version
+    """
+    version=version_info[:3]
+    attrs=("co_argcount",)
+    if (3,8) <= version:
+        attrs+=("co_posonlyargcount",)
+    attrs+=("co_kwonlyargcount","co_nlocals","co_stacksize","co_flags","co_code",
+            "co_consts", "co_names", "co_varnames", "co_filename", "co_name")
+    if (3,3) <= version:
+        attrs+=("co_qualname",)
+    attrs+=("co_firstlineno",)
+    if (3,10) <= version:
+        attrs+=("co_linetable",)
+    else:
+        attrs+=("co_lnotab",)
+    if (3,11) <= version:
+        attrs+=("co_exceptiontable",)
+    attrs+=("co_freevars","co_cellvars")
+    return attrs
+
+def attr_cmp(obj1,obj2,attrs):
+    for attr in attrs:
+        if getattr(obj1,attr)!=getattr(obj2,attr):
+            return False
+    return True
+
+def extract_genexpr(source_lines):
+    """
+    Goes through the source code extracting generator expressions
+    until a match is found on a code object basis
+    """
+    source,ID,is_genexpr="","",False
+    number_of_expressions,depth=0,0
+    for line in source_lines:
+        ## if it's a new_line and you're looking for a genexpr then it's not found ##
+        if number_of_expressions:
+            raise Exception("No matches to the original source code found")
+        for char in line:
+            ## skip all strings
+            # ...
+            ## detect brackets
+            if char=="(":
+                depth+=1
+            elif char==")":
+                depth-=1
+                if depth==0:
+                    if is_genexpr:
+                        yield source
+                        number_of_expressions+=1
+                        is_genexpr=False
+                    source=""
+                    ID=""
+            ## detect a for loop
+            if char==" " and depth > 0 and ID=="for":
+                is_genexpr=True
+            ## record source code ##
+            if depth:
+                source+=char
+                if char.isalnum():
+                    ID+=char
+                else:
+                    ID=""
+
+def genexpr_getsource(gen):
+    ## starting line ##
+    code_obj=gen.gi_code
+    source=findsource(code_obj)[0][gen.gi_frame.f_lineno-1:]
+    ## get the rest of the source ##
+    if (3,11) <= version_info[:3]:
+        lineno=gen.gi_frame.f_lineno
+        current_min,current_max,current_max_lineno=None,None,None
+        for pos in code_obj.co_positions():
+            if not pos[1]==pos[0]==lineno:
+                raise Exception("No matches to the original source code found")
+            if None not in pos:
+                if current_min:
+                    if pos[-2] < current_min:
+                        current_min=pos[-2]
+                    if pos[-1] > current_max:
+                        current_min=pos[-1]
+                    if pos[1] > current_max_lineno:
+                        current_max_lineno=pos[1]
+                else:
+                    current_max_lineno,current_min,current_max=pos[1:]
+        return "\n".join(source[lineno:current_max_lineno+1])[current_min:current_max]
+    ## otherwise match with generator expressions in the original source to get the source code ##
+    attrs=(attr for attr in code_attrs() if not attr in ('co_argcount','co_posonlyargcount','co_kwonlyargcount',
+                                                         'co_filename','co_linetable','co_linotab','co_exceptiontable'))
+    for source in extract_genexpr(source):
+        ## eval should be safe here assuming we have correctly extracted a generator expression ##
+        if attr_cmp(eval(source).gi_code,code_obj,attrs):
+            return source
+
+def unpack_genexpr(source):
+    """unpacks a generator expressions' for loops into a list of source lines"""
+    pass ## using a python parser would be best for this ##
+
 """
 TODO:
-1. think about getsource in relation to generator expressions that sometimes   - __init__
-   don't get their source retrieved and if there's also a col_offset
-2. fix for running generators                                                  - __init__
-3. check whitespace, linenos, attrs, e.g. the smaller details to clean up      - _clean_source_lines and others involved in _create_state
-4. format errors                                                               - throw
-5. write tests
-6. make an asynchronous verion? async generators have different attrs i.e. gi_frame is ag_frame
+1. fix for running generators                                                  - __init__
+2. check whitespace, linenos, attrs, multiline strings, e.g. the smaller details to clean up      - _clean_source_lines and others involved in _create_state
+3. format errors                                                               - throw
+4. write tests
+5. make an asynchronous verion? async generators have different attrs i.e. gi_frame is ag_frame
  - maybe make a preprocessor to rewrite some of the functions in Generator for ease of development
 """
 class Generator(object):
@@ -410,12 +509,17 @@ class Generator(object):
                          "_source_lines","lineno","state"):
                 setattr(self,attr,FUNC[attr])
         elif hasattr(FUNC,"gi_code"): ## an initialized generator ##
-            self.source=getsource(FUNC.gi_code)
-            # i.e. get the running line + col_offset (since the source code is can likely be not well formatted)
-            self.source=self.source.split("\n")[FUNC.gi_frame.f_lineno-FUNC.gi_code.co_firstlineno:]
-            self.source[0]=self.source[0][col_offset:]
-            self.source="\n".join(self.source)
-            self._source_lines=self._clean_source_lines()
+            if FUNC.gi_code.co_name=="<genexpr>":
+                self.source=genexpr_getsource(FUNC)
+                ## cleaning the expression ##
+                self._source_lines=unpack_genexpr(self.source)
+                ## figuring out what state it's in ##
+                pass
+                ## applying its state ##
+                pass
+            else:
+                self.source=getsource(FUNC.gi_code)
+                self._source_lines=self._clean_source_lines()
             self.gi_code=FUNC.gi_code
             self.gi_frame=FUNC.gi_frame
             ## gi_yieldfrom was introduced in python version 3.5 ##
@@ -550,7 +654,7 @@ class Generator(object):
         Generator(state)
 
 ## add the type annotations if the version is 3.5 or higher ##
-if (3,5) <= version_info[:3]:
+if (3,5) <= version_info:
     from typing import Callable,Any,NoReturn,Iterable
     import types
     ## utility functions
@@ -561,6 +665,11 @@ if (3,5) <= version_info[:3]:
     control_flow_adjust.__annotations__={"lines":list[str],"return":list[str]}
     temporary_loop_adjust.__annotations__={"line":str,"return":list[str]}
     send_adjust.__annotations__={"line":str,"return":tuple[None|int,None|list[str,str]]}
+    code_attrs.__annotations__={"return":tuple[str,...]}
+    attr_cmp.__annotations__={"obj1":object,"obj2":object,"attr":tuple[str,...],"return":bool}
+    extract_genexpr.__annotations__={"source_lines":list[str],"return":types.Generator[str]}
+    genexpr_getsource.__annotations__={"gen":types.Generator,"return":str}
+    unpack_genexpr.__annotations__={"source":str,"return":list[str]}
     ## Generator
     Generator._custom_adjustment.__annotations__={"line":str,"lineno":int,"return":list[str]}
     Generator._clean_source_lines.__annotations__={"source":str,"return":list[str]}
