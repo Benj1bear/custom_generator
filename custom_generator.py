@@ -156,11 +156,11 @@ class frame(object):
     f_locals={".send":None}
     f_lineno=0
     
-    def __init__(self,frame):
-        for attr in dir(frame):
-            if not attr.startswith("_"):
-                setattr(self,attr,getattr(frame,attr))
-
+    def __init__(self,frame=None):
+        if frame:
+            for attr in dir(frame):
+                if not attr.startswith("_"):
+                    setattr(self,attr,getattr(frame,attr))
 
 def code_attrs():
     """
