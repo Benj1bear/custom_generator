@@ -155,6 +155,12 @@ class frame(object):
     """acts as the initial FrameType"""
     f_locals={".send":None}
     f_lineno=0
+    
+    def __init__(self,frame):
+        for attr in dir(frame):
+            if not attr.startswith("_"):
+                setattr(self,attr,getattr(frame,attr))
+
 
 def code_attrs():
     """
@@ -162,20 +168,19 @@ def code_attrs():
     order of types.CodeTypes function signature 
     ideally and correct to the current version
     """
-    version=version_info[:3]
     attrs=("co_argcount",)
-    if (3,8) <= version:
+    if (3,8) <= version_info:
         attrs+=("co_posonlyargcount",)
     attrs+=("co_kwonlyargcount","co_nlocals","co_stacksize","co_flags","co_code",
             "co_consts", "co_names", "co_varnames", "co_filename", "co_name")
-    if (3,3) <= version:
+    if (3,3) <= version_info:
         attrs+=("co_qualname",)
     attrs+=("co_firstlineno",)
-    if (3,10) <= version:
+    if (3,10) <= version_info:
         attrs+=("co_linetable",)
     else:
         attrs+=("co_lnotab",)
-    if (3,11) <= version:
+    if (3,11) <= version_info:
         attrs+=("co_exceptiontable",)
     attrs+=("co_freevars","co_cellvars")
     return attrs
@@ -228,8 +233,8 @@ def genexpr_getsource(gen):
     code_obj=gen.gi_code
     source=findsource(code_obj)[0][gen.gi_frame.f_lineno-1:]
     ## get the rest of the source ##
-    if (3,11) <= version_info[:3]:
-        lineno=gen.gi_frame.f_lineno
+    if (3,11) <= version_info:
+        lineno=gen.gi_frame.f_lineno-1
         current_min,current_max,current_max_lineno=None,None,None
         for pos in code_obj.co_positions():
             if not pos[1]==pos[0]==lineno:
@@ -247,7 +252,7 @@ def genexpr_getsource(gen):
         return "\n".join(source[lineno:current_max_lineno+1])[current_min:current_max]
     ## otherwise match with generator expressions in the original source to get the source code ##
     attrs=(attr for attr in code_attrs() if not attr in ('co_argcount','co_posonlyargcount','co_kwonlyargcount',
-                                                         'co_filename','co_linetable','co_linotab','co_exceptiontable'))
+                                                         'co_filename','co_linetable','co_lnotab','co_exceptiontable'))
     for source in extract_genexpr(source):
         ## eval should be safe here assuming we have correctly extracted a generator expression ##
         if attr_cmp(eval(source).gi_code,code_obj,attrs):
@@ -257,9 +262,21 @@ def unpack_genexpr(source):
     """unpacks a generator expressions' for loops into a list of source lines"""
     pass ## using a python parser would be best for this ##
 
+def get_state(gen):
+    """
+    Gets a running generators state e.g. 
+    its frame and any hidden variables
+    """
+    state=frame(gen.gi_frame)
+    ## figure out if there's anything missing from f_locals e.g. implicit iterators in for loops ##
+    hidden_locals={}
+    pass
+    state.f_locals.update(hidden_locals)
+    return state
+
 """
 TODO:
-1. fix for running generators                                                  - __init__
+1. fix for running generators e.g. get their full state + unpack generator expressions
 2. check whitespace, linenos, attrs, multiline strings, e.g. the smaller details to clean up      - _clean_source_lines and others involved in _create_state
 3. format errors                                                               - throw
 4. write tests
@@ -513,15 +530,12 @@ class Generator(object):
                 self.source=genexpr_getsource(FUNC)
                 ## cleaning the expression ##
                 self._source_lines=unpack_genexpr(self.source)
-                ## figuring out what state it's in ##
-                pass
-                ## applying its state ##
-                pass
             else:
                 self.source=getsource(FUNC.gi_code)
                 self._source_lines=self._clean_source_lines()
             self.gi_code=FUNC.gi_code
-            self.gi_frame=FUNC.gi_frame
+            ## figuring out what it's full state is ##
+            self.gi_frame=get_state(FUNC)
             ## gi_yieldfrom was introduced in python version 3.5 ##
             if hasattr(FUNC,"gi_yieldfrom"):
                 self.gi_yieldfrom=FUNC.gi_yieldfrom
