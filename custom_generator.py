@@ -63,7 +63,7 @@ def collect_string(iter_val,reference):
         index,char=next(iter_val)
         line+=char
         backslash=False
-        if char=="\":
+        if char=="\\":
             backslash=True
     return index,line
 
@@ -232,17 +232,17 @@ def temporary_loop_adjust(line):
 
 def has_node(line,node):
     """Checks if a node has starting IDs that match"""
-    nodes,check=[],node.split()
+    nodes,checks=[],node.split()
     for char in line:
         if char.isalnum():
             ID+=char
         elif char==" ":
             if ID:
                 nodes+=[ID]
-                for node in nodes:
-                    if node!=check[index]
+                for node,check in zip(nodes,checks):
+                    if node!=check:
                         return False
-                if len(nodes)==len(check):
+                if len(nodes)==len(checks):
                     return True
     return False
 
@@ -429,7 +429,7 @@ def unpack_genexpr(source):
         if depth==0:
             if ID == "for":
                 lines+=[line[:-3]]
-            elif ID == "if" and len(code_blocks) >= 1:
+            elif ID == "if" and len(lines) >= 1:
                 lines+=[line[:-2],"if"+source[index:-1]] ## -1 to remove the end bracket
                 has_end_if=True ## for later to ensure for loops iters are extracted ##
                 break
@@ -443,12 +443,12 @@ def unpack_genexpr(source):
     indent=" "*4
     return [indent*(index)+line for index,line in enumerate(lines,start=1)]+\
            [indent*(index)+line for index,line in enumerate(if_blocks,start=len(lines)+1)]+\
-           ## we don't need to do '.0' here since this it will be the end of the function
            [indent*(index)+'decref(".%s")' % (index-1) for index in range(len(lines),1,-1)]
+           ## we don't need to do '.0' here since this it will be the end of the function
 
 def extract_lambda(source_lines):
     """Extracts each lambda expression from the source code"""
-    source,ID,is_genexpr,number_of_expressions,prev="","",False,0,(0,"")
+    source,ID,is_lambda,number_of_expressions,prev="","",False,0,(0,"")
     for line in source_lines:
         ## if it's a new_line and you're looking for the next genexpr then it's not found ##
         if number_of_expressions:
@@ -463,27 +463,26 @@ def extract_lambda(source_lines):
                     string_collector=collect_string
                 index,temp_line=string_collector(line,char)
                 prev=(index,char)
-                if depth:
+                if is_lambda:
                     source+=temp_line
                 continue
-            ## detect a for loop
-            if char==" " and depth > 0 and ID=="for":
-                is_genexpr=True
             ## detect brackets
             elif char=="(":
                 depth+=1
             elif char==")":
                 depth-=1
-                if depth==0:
-                    if is_genexpr:
-                        yield source+char
-                        number_of_expressions+=1
-                        is_genexpr=False
-                    source,ID="",""
-                continue
+            ## detect a lambda
+            if char==" " and depth <= 1 and ID=="lambda":
+                is_lambda=True
             ## record source code ##
-            if depth:
-                source+=char
+            if is_lambda:
+                if char=="\n;)":
+                    yield source
+                    source=""
+                    is_lambda=False
+                else:
+                    source+=char
+            else:
                 ## record ID ##
                 if char.isalnum():
                     ID+=char
@@ -643,9 +642,11 @@ class Generator(object):
                         self.jump_positions[pos[1]][1]=len(lines)+1
                     lines+=self._custom_adjustment(line)
                 if char in ":;":
+                    indented=True # just in case
                     line=" "*4
                     skip(source,get_indent(self.source[index+1:]))
                 else:
+                    indented=False
                     line=""
             else:
                 line+=char
@@ -707,10 +708,9 @@ class Generator(object):
         control flow statements, loops, etc. then set the adjusted 
         source code as the generators state
         """
+        ## extract and adjust the code section ##
         self.lineno+=self.gi_frame.f_lineno-self.init_len
-        ## extract the code section ##
         lines=self._source_lines[self.lineno:]
-        ## used on .send (shouldn't be modified by the user)
         self.state=self._loop_adjust(lines)
 
     ## try not to use variables here (otherwise it can mess with the state) ##
