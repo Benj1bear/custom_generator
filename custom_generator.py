@@ -734,31 +734,33 @@ class Generator(object):
 
 ## add the type annotations if the version is 3.5 or higher ##
 if (3,5) <= version_info:
-    from typing import Callable,Any,NoReturn,Iterable
-    import types
-    ## utility functions
+    from typing import Callable,Any,NoReturn,Iterable,Generator as builtin_Generator
+    ### utility functions ###
+    ## tracking ##
     track_iter.__annotations__={"obj":object,"return":object}
     untrack_iters.__annotations__={"return":None}
+    ## cleaning source code ##
     get_indent.__annotations__={"line":str,"return":int}
     skip.__annotations__={"iter_val":Iterable,"n":int,"return":None}
     is_alternative_statement.__annotations__={"line":str,"return":bool}
+    ## code adjustments ##
     extract_iter.__annotations__={"line":str,"return":str}
     control_flow_adjust.__annotations__={"lines":list[str],"return":list[str]}
     temporary_loop_adjust.__annotations__={"line":str,"return":list[str]}
     send_adjust.__annotations__={"line":str,"return":tuple[None|int,None|list[str,str]]}
+    ## genexpr ##
     code_attrs.__annotations__={"return":tuple[str,...]}
     attr_cmp.__annotations__={"obj1":object,"obj2":object,"attr":tuple[str,...],"return":bool}
-    extract_genexpr.__annotations__={"source_lines":list[str],"return":types.Generator[str]}
-    genexpr_getsource.__annotations__={"gen":types.Generator,"return":str}
+    extract_genexpr.__annotations__={"source_lines":list[str],"return":builtin_Generator}
+    genexpr_getsource.__annotations__={"gen":builtin_Generator,"return":str}
     unpack_genexpr.__annotations__={"source":str,"return":list[str]}
-    ## Generator
+    ### Generator ###
     Generator._custom_adjustment.__annotations__={"line":str,"lineno":int,"return":list[str]}
     Generator._clean_source_lines.__annotations__={"source":str,"return":list[str]}
-    Generator._set_reciever.__annotations__={"lines":list[str],"return":str}
     Generator._loop_adjust.__annotations__={"lines":list[str],"return":str}
     Generator._create_state.__annotations__={"return":None}
     Generator.init_states.__annotations__={"return":Iterable}
-    Generator.__init__.__annotations__={"FUNC":Callable|str|types.Generator|dict,"return":None}
+    Generator.__init__.__annotations__={"FUNC":Callable|str|builtin_Generator|dict,"return":None}
     Generator.__len__.__annotations__={"return":int}
     Generator.__iter__.__annotations__={"return":Iterable}
     Generator.__next__.__annotations__={"return":Any}
