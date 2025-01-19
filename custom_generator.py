@@ -47,6 +47,48 @@ if version_info < (2,6):
                 return args[0]
         return iter_val.next()
 
+def collect_string(iter_val,reference):
+    """
+    Skips strings in an iterable assuming correct python 
+    syntax and the char before is a qoutation mark
+    
+    Note: make sure iter_val is an enumerated type
+    """
+    index,char=next(iter_val)
+    backslash=False
+    line=""
+    while char!=reference and not backslash:
+        index,char=next(iter_val)
+        line+=char
+        backslash=False
+        if char=="\":
+            backslash=True
+    return index,line
+
+def collect_multiline_string(iter_val,reference):
+    """
+    Skips multiline strings in an iterable assuming 
+    correct python syntax and the char before is a 
+    qoutation mark
+    
+    Note: make sure iter_val is an enumerated type
+    """
+    indexes=[]
+    line=""
+    while True:
+        # skip strings
+        index,temp_line=skip_string(iter_val,reference)
+        line+=temp_line
+        indexes+=[index]
+        if len(indexes) == 3:
+            if indexes[2]-indexes[1] != 1:
+                indexes=[indexes[2]]
+            elif indexes[1]-indexes[0] != 1:
+                indexes=indexes[1:]
+            else:
+                return index,line
+    raise SyntaxError("invalid syntax")    
+
 def track_iter(obj):
     """
     Tracks an iterator in the local scope initiated by a for loop
@@ -448,38 +490,19 @@ class Generator(object):
         self.jump_positions,self._jump_stack,self._skip_indent=[],[],0
         ## setup source as an iterator and making sure the first indentation's correct ##
         source=enumerate(self.source[get_indent(source):])
-        line,lines,backslash,instring,indented,space=" "*4,[],False,False,False,0
+        line,lines,indented,space,prev=" "*4,[],False,0,(0,"")
         ## enumerate since I want the loop to use an iterator but the 
         ## index is needed to retain it for when it's used on get_indent
-        multi_line=False
-        prev=(0,"")
         for index,char in source:
             ## skip strings ##
-            if char=="'" or char=='"' and not backslash:
-
-                ###################################################
-                ## skip multiline strings as well (needs fixing) ##
-                ###################################################
-                if char==prev[1]:
-                    if prev:
-                        if len(prev)==2:
-                            if index-1==prev[0] and index-2==prev[1]:
-                                multi_line=True
-                            prev=tuple()
-                        elif index-1==prev[0]:
-                            prev+=(index,)
-                    else:
-                        prev[0]=index
+            if char=="'" or char=='"':
+                if prev[0]-1==index and char==prev[1]:
+                    string_collector=collect_multiline_string
+                else:
+                    string_collector=collect_string
                 prev=(index,char)
-
-                ##########################################
-                
-                instring=(instring + 1) % 2
-                line+=char
-            elif instring:
-                ## keep track of backslash ##
-                backslash=(char=="\\")
-                line+=char
+                index,temp_line=string_collector(source,char)
+                line+=temp_line
             ## makes the line singly spaced while retaining the indentation ##
             elif char==" ":
                 if indented:
@@ -652,7 +675,7 @@ class Generator(object):
             ## generator function ##
             elif isinstance(FUNC,FunctionType):
                 if FUNC.__code__.co_name=="<lambda>":
-                    self.source=lambda_getsource(FUNC)
+                    self.source=expr_getsource(FUNC,extract_lambda)
                 else:
                     self.source=getsource(FUNC)
                 self.gi_code=FUNC.__code__
@@ -714,7 +737,7 @@ class Generator(object):
             result=locals()["next_state"]()
             self.gi_running=False
             return result
-        except Exception as e: ## we should format the exception as it normally would be formmated ideally
+        except Exception as e: ## we should format the exception as it normally would be formatted ideally
             self.throw(e)
 
     def send(self,arg):
