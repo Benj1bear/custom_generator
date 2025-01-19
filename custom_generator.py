@@ -32,6 +32,21 @@ from sys import version_info
 if version_info < (3,):
     range = xrange
 
+if version_info < (2,6):
+    def next(iter_val,*args):
+        """
+        Return the next item from the iterator. If default is given and 
+        the iterator is exhausted, it is returned instead of raising StopIteration.
+        """
+        if len(args) > 1:
+            raise TypeError("next expected at most 2 arguments, got %d" % len(args))
+        if args:
+            try:
+                return iter_val.next()
+            except StopIteration:
+                return args[0]
+        return iter_val.next()
+
 def track_iter(obj):
     """
     Tracks an iterator in the local scope initiated by a for loop
@@ -183,18 +198,17 @@ class frame(object):
     """acts as the initial FrameType"""
     f_locals={".send":None}
     f_lineno=0
-    
+
     def __init__(self,frame=None):
         if frame:
             for attr in dir(frame):
                 if not attr.startswith("_"):
                     setattr(self,attr,getattr(frame,attr))
 
-
 def code_attrs():
     """
     all the attrs used by a CodeType object in 
-    order of types.CodeTypes function signature 
+    order of types.CodeType function signature 
     ideally and correct to the current version
     """
     attrs=("co_argcount",)
@@ -220,6 +234,54 @@ def attr_cmp(obj1,obj2,attrs):
         if getattr(obj1,attr)!=getattr(obj2,attr):
             return False
     return True
+
+def getcode(obj):
+    """Gets the code object from an object via commonly used attrs"""
+    for attr in ["__code__","gi_code","ag_code","cr_code"]:
+        if hasattr(obj,attr):
+            return getattr(obj,attr)
+    raise AttributeError("code object not found")
+
+def getframe(obj):
+    """Gets the frame object from an object via commonly used attrs"""
+    for attr in ["gi_frame","ag_frame","cr_frame"]:
+        if hasattr(obj,attr):
+            return getattr(obj,attr)
+    raise AttributeError("frame object not found")
+
+def expr_getsource(FUNC,extractor):
+    """
+    Uses co_positions or otherwise goes through the source code 
+    extracting expressions until a match is found on a code object 
+    basis to get the source
+    """
+    code_obj=getcode(FUNC)
+    if code_obj.co_name=="<lambda>":
+        source=getsource(code_obj)
+    else:
+        lineno=getframe(FUNC).f_lineno-1
+        source=findsource(code_obj)[0][lineno:]
+    ## get the rest of the source ##
+    if (3,11) <= version_info:
+        positions=code_obj.co_positions()
+        current_min,current_max,current_max_lineno=next(positions,(None,None,None))[1:]
+        for pos in positions:
+            if pos[-2] and pos[-2] < current_min:
+                current_min=pos[-2]
+            if pos[-1] and pos[-1] > current_max:
+                current_min=pos[-1]
+            if pos[1] and pos[1] > current_max_lineno:
+                current_max_lineno=pos[1]
+        if isinstance(source,list):
+            source="\n".join(source[:current_max_lineno+1])
+        return source[current_min:current_max]
+    ## otherwise match with generator expressions in the original source to get the source code ##
+    attrs=(attr for attr in code_attrs() if not attr in ('co_argcount','co_posonlyargcount','co_kwonlyargcount',
+                                                         'co_filename','co_linetable','co_lnotab','co_exceptiontable'))
+    for source in extractor(source):
+        ## eval should be safe here assuming we have correctly extracted a generator expression ##
+        if attr_cmp(getcode(eval(source)),code_obj,attrs):
+            return source
 
 def extract_genexpr(source_lines):
     """Extracts each generator expression from the source code"""
@@ -255,41 +317,6 @@ def extract_genexpr(source_lines):
                 else:
                     ID=""
 
-def genexpr_getsource(gen):
-    """
-    Uses co_positions or otherwise goes through the source code 
-    extracting generator expressions until a match is found on 
-    a code object basis to get the source
-    """
-    ## starting line ##
-    code_obj=gen.gi_code
-    source=findsource(code_obj)[0][gen.gi_frame.f_lineno-1:]
-    ## get the rest of the source ##
-    if (3,11) <= version_info:
-        lineno=gen.gi_frame.f_lineno-1
-        current_min,current_max,current_max_lineno=None,None,None
-        for pos in code_obj.co_positions():
-            if not pos[1]==pos[0]==lineno:
-                raise Exception("No matches to the original source code found")
-            if None not in pos:
-                if current_min:
-                    if pos[-2] < current_min:
-                        current_min=pos[-2]
-                    if pos[-1] > current_max:
-                        current_min=pos[-1]
-                    if pos[1] > current_max_lineno:
-                        current_max_lineno=pos[1]
-                else:
-                    current_max_lineno,current_min,current_max=pos[1:]
-        return "\n".join(source[lineno:current_max_lineno+1])[current_min:current_max]
-    ## otherwise match with generator expressions in the original source to get the source code ##
-    attrs=(attr for attr in code_attrs() if not attr in ('co_argcount','co_posonlyargcount','co_kwonlyargcount',
-                                                         'co_filename','co_linetable','co_lnotab','co_exceptiontable'))
-    for source in extract_genexpr(source):
-        ## eval should be safe here assuming we have correctly extracted a generator expression ##
-        if attr_cmp(eval(source).gi_code,code_obj,attrs):
-            return source
-
 def unpack_genexpr(source):
     """unpacks a generator expressions' for loops into a list of source lines"""
     code_blocks,line,ID,has_end_if=[],"","",None
@@ -310,6 +337,9 @@ def unpack_genexpr(source):
     for index,part in enumerate(code_blocks[1:]):
         source_lines+=[indent*index+part]
     return source_lines+[indent*index+"return "+code_blocks[0]]
+
+def extract_lambda():
+    pass
 
 """
 TODO:
@@ -547,7 +577,7 @@ class Generator(object):
         self.state=self._loop_adjust(lines)
 
     ## try not to use variables here (otherwise it can mess with the state) ##
-    init="""
+    init="""def next_state():
     locals().update(currentframe().f_back.f_locals['self'].gi_frame.f_locals)
     currentframe().f_back.f_locals['self'].gi_frame=currentframe()
     ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(currentframe().f_back), ctypes.c_int(0))
@@ -561,6 +591,8 @@ class Generator(object):
         It goes line by line to find the 
         lines that have the yield statements
         """
+        ## since self.state starts as 'None' ##
+        yield self._create_state()
         while self.state:
             try:
                 yield self._create_state()
@@ -576,14 +608,17 @@ class Generator(object):
         Note:
          - gi_running: is the generator currently being executed
          - gi_suspended: is the generator currently paused e.g. state is saved
-
         """
+        ## dict ##
         if isinstance(FUNC,dict):
+            ## will adjust attrs later. Still have to see what's going to be used first ##
             for attr in ("source","gi_code","gi_frame","gi_running","gi_suspended","gi_yieldfrom",
                          "_source_lines","lineno","state"):
                 setattr(self,attr,FUNC[attr])
-        elif hasattr(FUNC,"gi_code"): ## an initialized generator ##
-            if FUNC.gi_code.co_name=="<genexpr>":
+            return
+        ## running generator ##
+        elif hasattr(FUNC,"gi_code"):
+            if FUNC.gi_code.co_name=="<genexpr>": ## co_name is readonly e.g. can't be changed by user ##
                 self.source=genexpr_getsource(FUNC)
                 ## cleaning the expression ##
                 self._source_lines=unpack_genexpr(self.source)
@@ -595,40 +630,44 @@ class Generator(object):
                 3.11 and higher has co_positions and there's no 
                 other way that I currently know how to get the 
                 col_offset
+                
+                Therefore, already running generators can skip
+                the ';' when cleaning source lines potentially
                 """
                 self.source=getsource(FUNC.gi_code)
                 self._source_lines=self._clean_source_lines()
             self.gi_code=FUNC.gi_code
-            ## figuring out what it's full state is ##
-            #self.gi_frame=get_state(FUNC)
-            ## gi_yieldfrom was introduced in python version 3.5 ##
+            ## 'gi_yieldfrom' was introduced in python version 3.5 and yield from ... in 3.3 ##
             if hasattr(FUNC,"gi_yieldfrom"):
                 self.gi_yieldfrom=FUNC.gi_yieldfrom
             else:
                 self.gi_yieldfrom=None
             self.gi_suspended=True
+        ## uninitialized generator ##
         else:
-            ## getsource does work for expressions but it's got no col_offset which is not useful ##
-            ## but it may still work with some adjustments (maybe) ##
-            if isinstance(FUNC,str): ## from source code ##
+            ## source code string ##
+            if isinstance(FUNC,str):
                 self.source=FUNC
                 self.gi_code=compile(FUNC,"","eval")
-            elif isinstance(FUNC,FunctionType): ## a generator function ##
-                self.source=getsource(FUNC)
+            ## generator function ##
+            elif isinstance(FUNC,FunctionType):
+                if FUNC.__code__.co_name=="<lambda>":
+                    self.source=lambda_getsource(FUNC)
+                else:
+                    self.source=getsource(FUNC)
                 self.gi_code=FUNC.__code__
+            else:
+                raise TypeError("type '%s' is an invalid initializer for a Generator" % type(FUNC))
             ## make sure the source code is standardized and usable by this generator ##
             self._source_lines=self._clean_source_lines()
             ## create the states ##
             self.gi_frame=frame()
             self.gi_suspended=False
-            ## indicates what iterable is being yield from ##
-            ## when the yield is a yield from (introduced in python version 3.3) ##
             self.gi_yieldfrom=None
-            ############################################################
-            self.lineno=0 ## the current line number relative to self._source_lines ##
-            self.gi_frame.f_lineno=self.init_len # is this necessary??
-            ############################################################
+#         self.lineno=0
+#         self.gi_frame.f_lineno=self.init_len
         self.gi_running=False
+        self.state=None
         self.state_generator=self.init_states()
         if overwrite:
             if hasattr(FUNC,"__code__"):
@@ -647,7 +686,7 @@ class Generator(object):
         """
         def number_of_yields():
             """Gets the number of yields that are indented exactly 4 spaces"""
-            for line in self._source_lines:
+            for line in self.state:
                 indents=get_indent(line)
                 temp=line[indents:]
                 if temp.startswith("yield") and not temp.startswith("yield from"):
@@ -665,14 +704,11 @@ class Generator(object):
                 break
 
     def __next__(self):
-        """
-        1. change the state
-        2. return the value
-        """
+        """updates the current state and returns the result"""
         # set the next state and setup the function
         next(self.state_generator) ## it will raise a StopIteration for us
         ## update with the new state and get the frame ##
-        exec("def next_state():"+self.init+self.state,globals(),locals())
+        exec(self.init+self.state,globals(),locals())
         try: # get the locals dict, update the line position, and return the result
             self.gi_running=True
             result=locals()["next_state"]()
@@ -734,7 +770,8 @@ class Generator(object):
 
 ## add the type annotations if the version is 3.5 or higher ##
 if (3,5) <= version_info:
-    from typing import Callable,Any,NoReturn,Iterable,Generator as builtin_Generator
+    from typing import Callable,Any,NoReturn,Iterable,Generator as builtin_Generator,AsyncGenerator,Coroutine
+    from types import CodeType,FrameType
     ### utility functions ###
     ## tracking ##
     track_iter.__annotations__={"obj":object,"return":object}
@@ -748,12 +785,17 @@ if (3,5) <= version_info:
     control_flow_adjust.__annotations__={"lines":list[str],"return":list[str]}
     temporary_loop_adjust.__annotations__={"line":str,"return":list[str]}
     send_adjust.__annotations__={"line":str,"return":tuple[None|int,None|list[str,str]]}
-    ## genexpr ##
+    ## expr_getsource ##
     code_attrs.__annotations__={"return":tuple[str,...]}
     attr_cmp.__annotations__={"obj1":object,"obj2":object,"attr":tuple[str,...],"return":bool}
+    expr_getsource.__annotations__={"gen":builtin_Generator,"return":str}
+    ## genexpr ##
+    getcode.__annotations__={"obj":FunctionType|builtin_Generator|AsyncGenerator|Coroutine,"return":CodeType}
+    getframe.__annotations__={"obj":FunctionType|builtin_Generator|AsyncGenerator|Coroutine,"return":FrameType}
     extract_genexpr.__annotations__={"source_lines":list[str],"return":builtin_Generator}
-    genexpr_getsource.__annotations__={"gen":builtin_Generator,"return":str}
     unpack_genexpr.__annotations__={"source":str,"return":list[str]}
+    ## lambda ##
+    extract_lambda.__annotations__={"FUNC":FunctionType,"return":str}
     ### Generator ###
     Generator._custom_adjustment.__annotations__={"line":str,"lineno":int,"return":list[str]}
     Generator._clean_source_lines.__annotations__={"source":str,"return":list[str]}
