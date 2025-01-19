@@ -20,6 +20,8 @@ For python 2:
  - type annotations and the typing module were introduced in python 3.5
 
  - f-strings were introduced in python 3.6 (use i.e. "%s" % ... instead)
+ 
+ - builtin function 'next' was introduced in 2.6
 """
 
 from types import FunctionType
@@ -39,7 +41,7 @@ if version_info < (2,6):
         the iterator is exhausted, it is returned instead of raising StopIteration.
         """
         if len(args) > 1:
-            raise TypeError("next expected at most 2 arguments, got %d" % len(args))
+            raise TypeError("next expected at most 2 arguments, got %s" % len(args))
         if args:
             try:
                 return iter_val.next()
@@ -114,9 +116,18 @@ def untrack_iters():
     """removes all currently tracked iterators on the current frame"""
     f_locals=currentframe().f_back.f_locals
     for i in range(f_locals[".count"]):
-        del f_locals[i]
+        del f_locals[".%s" % i]
     del f_locals[".count"]
 
+def decref(key):
+    """decrease the tracking count and delete the current key"""
+    f_locals=currentframe().f_back.f_locals
+    del f_locals[".%s" % key]
+    if f_locals[".count"]==0:
+        del f_locals[".count"]
+    else:
+        f_locals[".count"]-=1
+    
 def get_indent(line):
     """Gets the number of spaces used in an indentation"""
     count=0
@@ -175,11 +186,10 @@ def control_flow_adjust(lines):
     'except' line on the next minimum indent
     """
     init_min=get_indent(lines[0])
-    if init_min == 4:
+    if init_min == 4 and not is_alternative_statement(lines[0][4:]):
         return lines
-    alternative,new_lines=False,[]
-    current_min=init_min
-    for line in lines: ## is having no lines possible? This would raise an error ##
+    alternative,new_lines,current_min=False,[],init_min
+    for index,line in enumerate(lines): ## is having no lines possible? This should raise an error ##
         temp=get_indent(line)
         ## skip over all alternative statements until it's not an alternative statement ##
         if alternative and temp > current_min:
@@ -200,9 +210,10 @@ def control_flow_adjust(lines):
         if current_min != 4:
             new_lines+=[line[init_min-4:]] ## -4 adjusts the initial block to an indentation of 4 ##
         else:
-            new_lines+=[line]
+            return new_lines+line[index:]
     return new_lines
 
+## shouldn't this be done to all subsequent blocks until the main block ?? ##
 def temporary_loop_adjust(line):
     """
     Formats the current code block 
@@ -219,20 +230,38 @@ def temporary_loop_adjust(line):
         return [indent+"locals()['.continue']=False",indent+"break"]
     return " "*4+line
 
+def has_node(line,node):
+    """Checks if a node has starting IDs that match"""
+    nodes,check=[],node.split()
+    for char in line:
+        if char.isalnum():
+            ID+=char
+        elif char==" ":
+            if ID:
+                nodes+=[ID]
+                for node in nodes:
+                    if node!=check[index]
+                        return False
+                if len(nodes)==len(check):
+                    return True
+    return False
+
 def send_adjust(line):
+    """Checks for variables assigned to yields for making adjustments"""
     flag=0
     parts=line.split("=")
     for index,node in enumerate(parts):
         node=node[get_indent(node):]
-        if node.startswith("yield from "):
+        if has_node(node,"yield from "):
             flag=1
             break
-        if node.startswith("yield "):
+        if has_node(node,"yield "):
             flag=2
             break
         if not node.isalnum(): ## makes sure we're assigning to a variable ##
             break
     if flag:
+        ## indicator       yield statement            assignments
         return flag,["=".join(parts[index:]),"=".join(parts[:index])+"=locals()['.send']"]
     return None,None
 
@@ -327,33 +356,43 @@ def expr_getsource(FUNC,extractor):
 
 def extract_genexpr(source_lines):
     """Extracts each generator expression from the source code"""
-    source,ID,is_genexpr="","",False
-    number_of_expressions,depth=0,0
+    source,ID,is_genexpr,number_of_expressions,depth,prev="","",False,0,0,(0,"")
     for line in source_lines:
-        ## if it's a new_line and you're looking for a genexpr then it's not found ##
+        ## if it's a new_line and you're looking for the next genexpr then it's not found ##
         if number_of_expressions:
             raise Exception("No matches to the original source code found")
-        for char in line:
-            ## skip all strings
-            # ...
+        line=enumerate(line)
+        for index,char in line:
+            ## skip all strings if not in depth
+            if char=="'" or char=='"':
+                if prev[0]-1==index and char==prev[1]:
+                    string_collector=collect_multiline_string
+                else:
+                    string_collector=collect_string
+                index,temp_line=string_collector(line,char)
+                prev=(index,char)
+                if depth:
+                    source+=temp_line
+                continue
+            ## detect a for loop
+            if char==" " and depth > 0 and ID=="for":
+                is_genexpr=True
             ## detect brackets
-            if char=="(":
+            elif char=="(":
                 depth+=1
             elif char==")":
                 depth-=1
                 if depth==0:
                     if is_genexpr:
-                        yield source
+                        yield source+char
                         number_of_expressions+=1
                         is_genexpr=False
-                    source=""
-                    ID=""
-            ## detect a for loop
-            if char==" " and depth > 0 and ID=="for":
-                is_genexpr=True
+                    source,ID="",""
+                continue
             ## record source code ##
             if depth:
                 source+=char
+                ## record ID ##
                 if char.isalnum():
                     ID+=char
                 else:
@@ -361,32 +400,108 @@ def extract_genexpr(source_lines):
 
 def unpack_genexpr(source):
     """unpacks a generator expressions' for loops into a list of source lines"""
-    code_blocks,line,ID,has_end_if=[],"","",None
-    for index,char in enumerate(source[1:-1]):
-        if ID=="for":
-            code_blocks+=[line[:-4]]
-        elif ID=="if" and len(code_blocks) > 2:
-            code_blocks+=[line[:-3],line[-3:]+source[index:-1]]
-            has_end_if=-1 ## for later to ensure for loops iters are extracted ##
-            break
-        ## skip strings,brackets,linecontinuations,and newline
-        # 1. stop until you hit a for
+    lines,line,ID,depth,has_end_if,prev,=[],"","",0,False,(0,"")
+    source_iter=enumerate(source[1:-1])
+    for index,char in source_iter:
+        if char in "\\\n":
+            continue
+        ## collect strings
+        if char=="'" or char=='"':
+            if prev[0]-1==index and char==prev[1]:
+                string_collector=collect_multiline_string
+            else:
+                string_collector=collect_string
+            index,temp_line=string_collector(source_iter,char)
+            prev=(index,char)
+            line+=temp_line
+            continue
+        if char=="(":
+            depth+=1
+        elif char==")":
+            depth-=1
+        ## accumulate the current line
         line+=char
-    ## get the iters ##
-    for index,iter_used in enumerate(extract_iter(code_block) for code_block in code_blocks[1:has_end_if]):
-        code_blocks=code_blocks[:index+1+index]+[iter_used]+code_blocks[index+1+index:]
-    source_lines,indent=" "," "*4
-    for index,part in enumerate(code_blocks[1:]):
-        source_lines+=[indent*index+part]
-    return source_lines+[indent*index+"return "+code_blocks[0]]
+        ## collect IDs
+        if char.isalnum():
+            ID+=char
+        else:
+            ID=""
+        if depth==0:
+            if ID == "for":
+                lines+=[line[:-3]]
+            elif ID == "if" and len(code_blocks) >= 1:
+                lines+=[line[:-2],"if"+source[index:-1]] ## -1 to remove the end bracket
+                has_end_if=True ## for later to ensure for loops iters are extracted ##
+                break
+    if_blocks=[lines[0]]
+    if has_end_if:
+        if_blocks=[lines[-1]]+if_blocks
+        lines=lines[1:-1]
+    else: ## no end if
+        lines=lines[1:]+[line]
+    ## arrange into lines making sure to decref the created track_iters
+    indent=" "*4
+    return [indent*(index)+line for index,line in enumerate(lines,start=1)]+\
+           [indent*(index)+line for index,line in enumerate(if_blocks,start=len(lines)+1)]+\
+           ## we don't need to do '.0' here since this it will be the end of the function
+           [indent*(index)+'decref(".%s")' % (index-1) for index in range(len(lines),1,-1)]
 
-def extract_lambda():
-    pass
+def extract_lambda(source_lines):
+    """Extracts each lambda expression from the source code"""
+    source,ID,is_genexpr,number_of_expressions,prev="","",False,0,(0,"")
+    for line in source_lines:
+        ## if it's a new_line and you're looking for the next genexpr then it's not found ##
+        if number_of_expressions:
+            raise Exception("No matches to the original source code found")
+        line=enumerate(line)
+        for index,char in line:
+            ## skip all strings if not in depth
+            if char=="'" or char=='"':
+                if prev[0]-1==index and char==prev[1]:
+                    string_collector=collect_multiline_string
+                else:
+                    string_collector=collect_string
+                index,temp_line=string_collector(line,char)
+                prev=(index,char)
+                if depth:
+                    source+=temp_line
+                continue
+            ## detect a for loop
+            if char==" " and depth > 0 and ID=="for":
+                is_genexpr=True
+            ## detect brackets
+            elif char=="(":
+                depth+=1
+            elif char==")":
+                depth-=1
+                if depth==0:
+                    if is_genexpr:
+                        yield source+char
+                        number_of_expressions+=1
+                        is_genexpr=False
+                    source,ID="",""
+                continue
+            ## record source code ##
+            if depth:
+                source+=char
+                ## record ID ##
+                if char.isalnum():
+                    ID+=char
+                else:
+                    ID=""
 
 """
 TODO:
-1. fix for running generators e.g. get their full state + unpack generator expressions
-2. check whitespace, linenos, attrs, multiline strings, e.g. the smaller details to clean up      - _clean_source_lines and others involved in _create_state
+
+1. check whitespace, linenos, attrs, multiline strings, e.g. the smaller details to clean up      - _clean_source_lines and others involved in _create_state
+i.e. the following need to be checked and cleaned up:
+control_flow_adjust
+temporary_loop_adjust
+_clean_source_lines
+_custom_adjust
+
+2. consider named expressions e.g. (a:=...) in how it might effect i.e. extract_lambda/extract_genexpr among others potentially
+
 3. format errors                                                               - throw
 4. write tests
 5. make an asynchronous verion? async generators have different attrs i.e. gi_frame is ag_frame
@@ -494,14 +609,14 @@ class Generator(object):
         ## enumerate since I want the loop to use an iterator but the 
         ## index is needed to retain it for when it's used on get_indent
         for index,char in source:
-            ## skip strings ##
+            ## collect strings ##
             if char=="'" or char=='"':
                 if prev[0]-1==index and char==prev[1]:
                     string_collector=collect_multiline_string
                 else:
                     string_collector=collect_string
-                prev=(index,char)
                 index,temp_line=string_collector(source,char)
+                prev=(index,char)
                 line+=temp_line
             ## makes the line singly spaced while retaining the indentation ##
             elif char==" ":
@@ -515,7 +630,7 @@ class Generator(object):
                 space=index
             ## join everything after the line continuation until the next \n or ; ##
             elif char=="\\":
-                skip(source,get_indent(source[index+1:])) ## +1 since index: is inclusive ##
+                skip(source,get_indent(self.source[index+1:])) ## +1 since 'index:' is inclusive ##
             ## create new line ##
             elif char in "\n;:":
                 if char==":":
@@ -529,7 +644,7 @@ class Generator(object):
                     lines+=self._custom_adjustment(line)
                 if char in ":;":
                     line=" "*4
-                    skip(source,get_indent(source[index+1:]))
+                    skip(source,get_indent(self.source[index+1:]))
                 else:
                     line=""
             else:
@@ -596,7 +711,6 @@ class Generator(object):
         ## extract the code section ##
         lines=self._source_lines[self.lineno:]
         ## used on .send (shouldn't be modified by the user)
-        self.reciever=self._set_reciever(lines)
         self.state=self._loop_adjust(lines)
 
     ## try not to use variables here (otherwise it can mess with the state) ##
@@ -796,6 +910,8 @@ if (3,5) <= version_info:
     from typing import Callable,Any,NoReturn,Iterable,Generator as builtin_Generator,AsyncGenerator,Coroutine
     from types import CodeType,FrameType
     ### utility functions ###
+    collect_string.__annotations__={"iter_val":Iterable,"reference":str,"return":str}
+    collect_multiline_string.__annotations__={"iter_val":Iterable,"reference":str,"return":str}
     ## tracking ##
     track_iter.__annotations__={"obj":object,"return":object}
     untrack_iters.__annotations__={"return":None}
@@ -807,14 +923,15 @@ if (3,5) <= version_info:
     extract_iter.__annotations__={"line":str,"return":str}
     control_flow_adjust.__annotations__={"lines":list[str],"return":list[str]}
     temporary_loop_adjust.__annotations__={"line":str,"return":list[str]}
+    has_node.__annotations__={"line":str,"node":str,"return":bool}
     send_adjust.__annotations__={"line":str,"return":tuple[None|int,None|list[str,str]]}
     ## expr_getsource ##
     code_attrs.__annotations__={"return":tuple[str,...]}
     attr_cmp.__annotations__={"obj1":object,"obj2":object,"attr":tuple[str,...],"return":bool}
     expr_getsource.__annotations__={"gen":builtin_Generator,"return":str}
-    ## genexpr ##
     getcode.__annotations__={"obj":FunctionType|builtin_Generator|AsyncGenerator|Coroutine,"return":CodeType}
     getframe.__annotations__={"obj":FunctionType|builtin_Generator|AsyncGenerator|Coroutine,"return":FrameType}
+    ## genexpr ##
     extract_genexpr.__annotations__={"source_lines":list[str],"return":builtin_Generator}
     unpack_genexpr.__annotations__={"source":str,"return":list[str]}
     ## lambda ##
