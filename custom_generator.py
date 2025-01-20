@@ -152,27 +152,6 @@ else:
         return line.startswith("elif") or line.startswith("else") or line.startswith("case") or line.startswith("default")
 is_alternative_statement.__doc__="Checks if a line is an alternative statement"
 
-def extract_iter(line):
-    """
-    Extracts the iterator from a for loop
-    
-    e.g. we extract the second ... in:
-    for ... in ...:
-    """
-    # 1. get the length of the ids on the left hand side of the "in" keyword
-    ID=""
-    for index,char in enumerate(line):
-        if char.isalphnum():
-            ID+=char
-            if ID=="in":
-                break
-        else:
-            ID=""
-    # 2. collect everything on the right hand side of the "in" keyword
-    # 3. remove the end colon
-    ## +1 for 0 based indexing, +1 for whitespace after ##
-    return line[index+2:][:-1]
-
 def control_flow_adjust(lines):
     """
     removes unreachable control flow blocks that 
@@ -261,8 +240,7 @@ def has_node(line,node):
 
 def send_adjust(line):
     """Checks for variables assigned to yields for making adjustments"""
-    flag=0
-    parts=line.split("=")
+    parts,flag=line.split("="),0
     for index,node in enumerate(parts):
         node=node[get_indent(node):]
         if has_node(node,"yield from "):
@@ -524,9 +502,9 @@ TODO:
 
 1. finish the following:
 
-control_flow_adjust   - test to see if except does get included as a first line of a state (it shouldn't)
-_custom_adjust
-_loop_adjust
+control_flow_adjust - test to see if except does get included as a first line of a state (it shouldn't)
+_custom_adjustment  - check if 'yield from' send adjustment is correct and if you should do locals()['.i'] or f_locals
+_loop_adjust        - fix so that it works for nested loops and multiple loops in one loop block
 
 ---------
 - other -
@@ -605,14 +583,7 @@ class Generator(object):
                             indent+"    return currentframe().f_back.f_locals['.i']"]
                 elif temp_line.startswith("yield "):
                     return [indent+"return"+temp_line[5:]] ## 5 to retain the whitespace ##
-                elif temp_line.startswith("for "):
-                    self.jump_positions+=[(lineno,None)]
-                    self._jump_stack+=[(number_of_indents,len(self.jump_positions)-1)]
-                    ## shouldn't be needed anymore if usign track_iter ##
-                    ## what about genexpr and generator iterators? if using monkey patching ##
-                    return [indent+"currentframe().f_back.f_locals['.iter']=iter(%s)" % extract_iter(temp_line[4:]),
-                            indent+"for i in currentframe().f_back.f_locals['.iter']:"]
-                elif temp_line.startswith("while "):
+                elif temp_line.startswith("for ") or temp_line.startswith("while "):
                     self.jump_positions+=[(lineno,None)]
                     self._jump_stack+=[(number_of_indents,len(self.jump_positions)-1)]
                 elif temp_line.startswith("return "):
@@ -622,8 +593,10 @@ class Generator(object):
                 flag,adjustment=send_adjust(line)
                 if flag:
                     if flag==1:
+                        ## 5: to get past the 'yield'
                         return [indent+"return"+adjustment[0][5:]]+adjustment[1]
                     else:
+                        ## 11: to get past the 'yield from'
                         return [indent+"currentframe().f_back.f_locals['.yieldfrom']="+adjustment[0][11:],
                                 indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
                                 indent+"    return currentframe().f_back.f_locals['.i']"]+adjustment[1]
@@ -642,7 +615,7 @@ class Generator(object):
         additionally, custom_adjustment will be called on each line formation as well
 
         Note:
-        jump_positions: are the fixed list of (lineno,end_lineno) for the loops (for and while?)
+        jump_positions: are the fixed list of (lineno,end_lineno) for the loops (for and while)
         _jump_stack: jump_positions currently being recorded (gets popped into jump_positions once 
                      the reference indent has been met or lower for the next line that does so)
                      it records a tuple of (reference_indent,jump_position_index)
@@ -722,30 +695,48 @@ class Generator(object):
         also contains the rest of the source lines as well
         """
         ## jump_positions are in the form (start_lineno,end_lineno) ##
+        loops,end_pos,inner_positions=[],[],len(self._source_lines),None
         positions=iter(self.jump_positions)
+        ## get the outer loops that contian the current lineno ##
         for pos in positions: ## importantly we go from start to finish to capture nesting loops ##
+            ## make sure the lineno is contained within the position for a ##
+            ## loop adjustment and because the jump positions are ordered we ##
+            ## can also break when the start lineno is beyond the current lineno ##
             if self.lineno < pos[0]:
+                ## check if it's an inner loop ##
+                while end_pos >= pos[1]:
+                    if 
+                    inner_positions+=[pos]
+                    next(positions)
                 break
-            elif self.lineno < pos[1]:
-                ## handle nested loops ##
+            if self.lineno < pos[1]:
                 end_pos=pos[1]
-                ## is the outermost loop ##
-                loops=[self._source_lines[pos[0]:]]
-                for pos in positions:
-                    if self.lineno >= pos[1]:
-                        break
-                    loops+=[self._source_lines[pos[0]:pos[1]]]
-                    # new_state="\n".join(temp)+"\n"+new_state
-                ## make sure the break statement adjustment can work ##
-                loops[-1]=["if locals()['.continue']:"]+[" "*4+line for line in loops[-1]]
-                loops="\n".join("\n".join(loop) for loop in loops)
-                ## adjust the current code block then return the combined result ##
-                current_code=[]
-                for line in control_flow_adjust(lines[:end_pos]):
-                    ## we do it this way since you can get [...,...] which won't work as a list comprehension ##
-                    current_code+=temporary_loop_adjust(line)
-                current_code=["while True:"]+current_code+[" "*4+"break"]
-                return "\n".join(current_code+loops)
+                loops+=[pos]
+        if loops:
+            ## control flow adjust from the lineno up to the next inner for loop ##
+            if inner_positions:
+                temp1=control_flow_adjust(lines[:inner_positions[0]])
+                temp2=control_flow_adjust(lines[inner_positions[1]:end_pos])
+            else:
+                temp=control_flow_adjust(lines[:end_pos])
+            temp=["while True:"]+[" "*4+temporary_loop_adjust(line) for line in temp]+[" "*4+"break","if locals()['.continue']:"]
+            ## rest of the lines ##
+            lines=lines[end_pos:]
+            
+            ## starting from the end of loops ##
+            ## 1. get its source lines ##
+            ## 
+            
+            # ## make sure the break statement adjustment can work ##
+            # loops[-1]=["if locals()['.continue']:"]+[" "*4+line for line in loops[-1]]
+            # loops="\n".join("\n".join(loop) for loop in loops)
+            # ## adjust the current code block then return the combined result ##
+            # current_code=[]
+            # for line in control_flow_adjust(lines[:end_pos]):
+            #     ## we do it this way since you can get [...,...] which won't work as a list comprehension ##
+            #     current_code+=temporary_loop_adjust(line)
+            # current_code=["while True:"]+current_code+[" "*4+"break"]
+            # return "\n".join(current_code+loops)
         return "\n".join(control_flow_adjust(lines))
 
     def _create_state(self):
@@ -979,7 +970,6 @@ if (3,5) <= version_info:
     skip.__annotations__={"iter_val":Iterable,"n":int,"return":None}
     is_alternative_statement.__annotations__={"line":str,"return":bool}
     ## code adjustments ##
-    extract_iter.__annotations__={"line":str,"return":str}
     control_flow_adjust.__annotations__={"lines":list[str],"return":list[str]}
     temporary_loop_adjust.__annotations__={"line":str,"return":list[str]}
     has_node.__annotations__={"line":str,"node":str,"return":bool}
