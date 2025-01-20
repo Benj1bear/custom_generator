@@ -196,7 +196,7 @@ def control_flow_adjust(lines):
             continue
         elif temp == current_min:
             ## this needs to be checked in case we need to remove an except statement if it shows up
-            ##  one the first instance 
+            ##  on the first instance 
             ## I'm thinking that it shouldn't happen since the line should go into the except
             ## block rather than the statement
             # if temp_line.startswith("except"):
@@ -478,7 +478,7 @@ def unpack_genexpr(source):
 
 def extract_lambda(source_code):
     """Extracts each lambda expression from the source code string"""
-    source,ID,is_lambda,prev="","",False,(0,"")
+    source,ID,is_lambda,lambda_depth,prev="","",False,0,(0,"")
     source_code=enumerate(source_code)
     for index,char in source_code:
         ## skip all strings if not in lambda
@@ -499,7 +499,7 @@ def extract_lambda(source_code):
             depth-=1
         ## record source code ##
         if is_lambda:
-            if char=="\n;)":
+            if char=="\n;" or (char==")" and depth+1==lambda_depth): # lambda_depth needed in case of brackets; depth+1 since depth would've got reduced by 1
                 yield source
                 source,ID,is_lambda="","",False
             else:
@@ -511,6 +511,7 @@ def extract_lambda(source_code):
                 ## detect a lambda
                 if ID == "lambda" and depth <= 1:
                     is_lambda=True
+                    lambda_depth=depth
                     source+=ID
             else:
                 ID=""
@@ -524,7 +525,6 @@ TODO:
 1. finish the following:
 
 control_flow_adjust   - test to see if except does get included as a first line of a state (it shouldn't)
-_clean_source_lines
 _custom_adjust
 _loop_adjust
 
@@ -592,13 +592,14 @@ class Generator(object):
         """
         number_of_indents=get_indent(line)
         if self._skip_indent <= number_of_indents: ## skips if greater to avoid definitions ##
-            indent=" "*number_of_indents
             temp_line=line[number_of_indents:]
             if temp_line.startswith("def ") or temp_line.startswith("async def ") or temp_line.startswith("class ") or temp_line.startswith("async class "):
                 self._skip_indent=number_of_indents
             else:
                 self._skip_indent=0
+                indent=" "*number_of_indents
                 if temp_line.startswith("yield from "):
+                    ## will locals()['.i'] suffice? or does it have to be f_locals??? ##
                     return [indent+"currentframe().f_back.f_locals['.yieldfrom']="+temp_line[11:],
                             indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
                             indent+"    return currentframe().f_back.f_locals['.i']"]
@@ -607,6 +608,8 @@ class Generator(object):
                 elif temp_line.startswith("for "):
                     self.jump_positions+=[(lineno,None)]
                     self._jump_stack+=[(number_of_indents,len(self.jump_positions)-1)]
+                    ## shouldn't be needed anymore if usign track_iter ##
+                    ## what about genexpr and generator iterators? if using monkey patching ##
                     return [indent+"currentframe().f_back.f_locals['.iter']=iter(%s)" % extract_iter(temp_line[4:]),
                             indent+"for i in currentframe().f_back.f_locals['.iter']:"]
                 elif temp_line.startswith("while "):
@@ -637,6 +640,13 @@ class Generator(object):
         3. join up the line continuations i.e. "\ ... " will be skipped
         
         additionally, custom_adjustment will be called on each line formation as well
+
+        Note:
+        jump_positions: are the fixed list of (lineno,end_lineno) for the loops (for and while?)
+        _jump_stack: jump_positions currently being recorded (gets popped into jump_positions once 
+                     the reference indent has been met or lower for the next line that does so)
+                     it records a tuple of (reference_indent,jump_position_index)
+        _skip_indent: the indent level of a definition being defined (definitions shouldn't be adjusted)
         """
         ## for loop adjustments ##
         self.jump_positions,self._jump_stack,self._skip_indent=[],[],0
@@ -670,30 +680,33 @@ class Generator(object):
                 skip(source,get_indent(self.source[index+1:])) ## +1 since 'index:' is inclusive ##
             ## create new line ##
             elif char in "\n;:":
+                ## make sure to include it ##
                 if char==":":
                     line+=char
                 if not line.isspace(): ## empty lines are possible ##
-                    reference_indent=get_indent(line)
-                    while reference_indent == self._jump_stack[-1][0]:
-                        pos=self._jump_stack.pop()
-                        reference_indent=pos[0]
-                        self.jump_positions[pos[1]][1]=len(lines)+1
+                    if self._jump_stack:
+                        reference_indent=get_indent(line)
+                        while self._jump_stack and reference_indent <= self._jump_stack[-1][0]: # -1: top of stack, 0: start lineno
+                            self.jump_positions[self._jump_stack.pop()[1]][1]=len(lines)+1 ## +1 assuming exclusion slicing on the stop index ##
                     lines+=self._custom_adjustment(line)
+                ## start a new line ##
                 if char in ":;":
                     indented=True # just in case
                     line=" "*4
+                    ## skip the indents since these are variable ##
                     skip(source,get_indent(self.source[index+1:]))
                 else:
                     indented=False
                     line=""
             else:
                 line+=char
-        if self._jump_stack:
-            ## in case you get a for loop at the end ##
-            for reference_indent in range(get_indent(line),0,-4):
-                if reference_indent == self._jump_stack[-1][0]:
-                    self.jump_positions[self._jump_stack.pop()[1]][1]=len(lines)+1
-        ## are not used by this generator (was only for formatting source code) ##
+        ## in case you get a for loop at the end and you haven't got the end jump_position ##
+        ## then you just pop them all off as being the same end_lineno ##
+        end_lineno=len(lines)+1
+        while self._jump_stack:
+            self.jump_positions[self._jump_stack.pop()[1]][1]=end_lineno            
+        ## are not used by this generator (was only for formatting source code and 
+        ## recording the jump positions needed in the for loop adjustments) ##
         del self._jump_stack,self._skip_indent
         return lines
 
@@ -708,6 +721,7 @@ class Generator(object):
         outermost nesting will be the final section that
         also contains the rest of the source lines as well
         """
+        ## jump_positions are in the form (start_lineno,end_lineno) ##
         positions=iter(self.jump_positions)
         for pos in positions: ## importantly we go from start to finish to capture nesting loops ##
             if self.lineno < pos[0]:
@@ -748,8 +762,7 @@ class Generator(object):
         """
         ## extract and adjust the code section ##
         self.lineno+=self.gi_frame.f_lineno-self.init_len
-        lines=self._source_lines[self.lineno:]
-        self.state=self._loop_adjust(lines)
+        self.state=self._loop_adjust(self._source_lines[self.lineno:])
 
     ## try not to use variables here (otherwise it can mess with the state) ##
     init="""def next_state():
