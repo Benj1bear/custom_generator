@@ -185,16 +185,22 @@ def control_flow_adjust(lines):
     It will also add 'try:' when there's an
     'except' line on the next minimum indent
     """
-    init_min=get_indent(lines[0])
-    if init_min == 4 and not is_alternative_statement(lines[0][4:]):
+    init_min,alternative=get_indent(lines[0]),is_alternative_statement(lines[0][4:])
+    if init_min == 4 and not alternative:
         return lines
-    alternative,new_lines,current_min=False,[],init_min
+    new_lines,current_min=[],init_min
     for index,line in enumerate(lines): ## is having no lines possible? This should raise an error ##
         temp=get_indent(line)
         ## skip over all alternative statements until it's not an alternative statement ##
         if alternative and temp > current_min:
             continue
         elif temp == current_min:
+            ## this needs to be checked in case we need to remove an except statement if it shows up
+            ##  one the first instance 
+            ## I'm thinking that it shouldn't happen since the line should go into the except
+            ## block rather than the statement
+            # if temp_line.startswith("except"):
+            #     continue
             alternative=is_alternative_statement(line[temp:])
         elif temp < current_min:
             current_min=temp
@@ -220,6 +226,10 @@ def temporary_loop_adjust(line):
     being executed such that all the
     continue -> break;
     break -> empty the current iter; break;
+
+    This allows us to use the control
+    flow statements by implementing a
+    simple while loop and if statement
     """
     indent=get_indent(line)
     temp=line[indent:]
@@ -234,6 +244,9 @@ def has_node(line,node):
     """Checks if a node has starting IDs that match"""
     nodes,checks=[],node.split()
     for char in line:
+        ## no strings allowed ##
+        if char=="'" or char=='"':
+            return False
         if char.isalnum():
             ID+=char
         elif char==" ":
@@ -257,8 +270,6 @@ def send_adjust(line):
             break
         if has_node(node,"yield "):
             flag=2
-            break
-        if not node.isalnum(): ## makes sure we're assigning to a variable ##
             break
     if flag:
         ## indicator       yield statement            assignments
@@ -320,42 +331,61 @@ def getframe(obj):
             return getattr(obj,attr)
     raise AttributeError("frame object not found")
 
-def expr_getsource(FUNC,extractor):
+def expr_getsource(FUNC):
     """
     Uses co_positions or otherwise goes through the source code 
     extracting expressions until a match is found on a code object 
     basis to get the source
+
+    Note:
+    the extractor should return a string and if using a 
+    lambda extractor it will take in a string input but
+    if using a generator expression extractor it will 
+    take a list instead
     """
     code_obj=getcode(FUNC)
     if code_obj.co_name=="<lambda>":
+        ## here source is a : str
         source=getsource(code_obj)
+        extractor=extract_lambda
     else:
         lineno=getframe(FUNC).f_lineno-1
+        ## here source is a : list[str]
         source=findsource(code_obj)[0][lineno:]
+        extractor=extract_genexpr
     ## get the rest of the source ##
     if (3,11) <= version_info:
+        # start_line, end_line, start_col, end_col
         positions=code_obj.co_positions()
-        current_min,current_max,current_max_lineno=next(positions,(None,None,None))[1:]
+        is_source_list=isinstance(source,list)
+        pos=next(positions,(None,None,None))[1:]
+        current_min,current_max=pos[2:]
+        if is_source_list:
+            current_max_lineno=pos[1]
         for pos in positions:
             if pos[-2] and pos[-2] < current_min:
                 current_min=pos[-2]
             if pos[-1] and pos[-1] > current_max:
                 current_min=pos[-1]
-            if pos[1] and pos[1] > current_max_lineno:
+            if is_source_list and pos[1] and pos[1] > current_max_lineno:
                 current_max_lineno=pos[1]
-        if isinstance(source,list):
+        if is_source_list:
             source="\n".join(source[:current_max_lineno+1])
         return source[current_min:current_max]
     ## otherwise match with generator expressions in the original source to get the source code ##
     attrs=(attr for attr in code_attrs() if not attr in ('co_argcount','co_posonlyargcount','co_kwonlyargcount',
                                                          'co_filename','co_linetable','co_lnotab','co_exceptiontable'))
     for source in extractor(source):
-        ## eval should be safe here assuming we have correctly extracted a generator expression ##
-        if attr_cmp(getcode(eval(source)),code_obj,attrs):
-            return source
+        try: ## we need to make it a try-except in case of potential syntax errors towards the end of the line/s ##
+            ## eval should be safe here assuming we have correctly extracted the expression - we can't use compile because it gives a different result ##
+            if attr_cmp(getcode(eval(source)),code_obj,attrs):
+                return source
+        except:
+            pass
+    raise Exception("No matches to the original source code found")
 
 def extract_genexpr(source_lines):
-    """Extracts each generator expression from the source code"""
+    """Extracts each generator expression from a list of the source code lines"""
     source,ID,is_genexpr,number_of_expressions,depth,prev="","",False,0,0,(0,"")
     for line in source_lines:
         ## if it's a new_line and you're looking for the next genexpr then it's not found ##
@@ -374,9 +404,6 @@ def extract_genexpr(source_lines):
                 if depth:
                     source+=temp_line
                 continue
-            ## detect a for loop
-            if char==" " and depth > 0 and ID=="for":
-                is_genexpr=True
             ## detect brackets
             elif char=="(":
                 depth+=1
@@ -395,12 +422,15 @@ def extract_genexpr(source_lines):
                 ## record ID ##
                 if char.isalnum():
                     ID+=char
+                    ## detect a for loop
+                    if ID=="for":
+                        is_genexpr=True
                 else:
                     ID=""
 
 def unpack_genexpr(source):
     """unpacks a generator expressions' for loops into a list of source lines"""
-    lines,line,ID,depth,has_end_if,prev,=[],"","",0,False,(0,"")
+    lines,line,ID,depth,has_end_if,prev=[],"","",0,False,(0,"")
     source_iter=enumerate(source[1:-1])
     for index,char in source_iter:
         if char in "\\\n":
@@ -444,67 +474,75 @@ def unpack_genexpr(source):
     return [indent*(index)+line for index,line in enumerate(lines,start=1)]+\
            [indent*(index)+line for index,line in enumerate(if_blocks,start=len(lines)+1)]+\
            [indent*(index)+'decref(".%s")' % (index-1) for index in range(len(lines),1,-1)]
-           ## we don't need to do '.0' here since this it will be the end of the function
+           ## we don't need to do '.0' here since it will be the end of the function e.g. it'll get garbage collected
 
-def extract_lambda(source_lines):
-    """Extracts each lambda expression from the source code"""
-    source,ID,is_lambda,number_of_expressions,prev="","",False,0,(0,"")
-    for line in source_lines:
-        ## if it's a new_line and you're looking for the next genexpr then it's not found ##
-        if number_of_expressions:
-            raise Exception("No matches to the original source code found")
-        line=enumerate(line)
-        for index,char in line:
-            ## skip all strings if not in depth
-            if char=="'" or char=='"':
-                if prev[0]-1==index and char==prev[1]:
-                    string_collector=collect_multiline_string
-                else:
-                    string_collector=collect_string
-                index,temp_line=string_collector(line,char)
-                prev=(index,char)
-                if is_lambda:
-                    source+=temp_line
-                continue
-            ## detect brackets
-            elif char=="(":
-                depth+=1
-            elif char==")":
-                depth-=1
-            ## detect a lambda
-            if char==" " and depth <= 1 and ID=="lambda":
-                is_lambda=True
-            ## record source code ##
-            if is_lambda:
-                if char=="\n;)":
-                    yield source
-                    source=""
-                    is_lambda=False
-                else:
-                    source+=char
+def extract_lambda(source_code):
+    """Extracts each lambda expression from the source code string"""
+    source,ID,is_lambda,prev="","",False,(0,"")
+    source_code=enumerate(source_code)
+    for index,char in source_code:
+        ## skip all strings if not in lambda
+        if char=="'" or char=='"':
+            if prev[0]-1==index and char==prev[1]:
+                string_collector=collect_multiline_string
             else:
-                ## record ID ##
-                if char.isalnum():
-                    ID+=char
-                else:
-                    ID=""
+                string_collector=collect_string
+            index,temp_line=string_collector(source_code,char)
+            prev=(index,char)
+            if is_lambda:
+                source+=temp_line
+            continue
+        ## detect brackets
+        elif char=="(":
+            depth+=1
+        elif char==")":
+            depth-=1
+        ## record source code ##
+        if is_lambda:
+            if char=="\n;)":
+                yield source
+                source,ID,is_lambda="","",False
+            else:
+                source+=char
+        else:
+            ## record ID ##
+            if char.isalnum():
+                ID+=char
+                ## detect a lambda
+                if ID == "lambda" and depth <= 1:
+                    is_lambda=True
+                    source+=ID
+            else:
+                ID=""
+    ## in case of a current match ending ##
+    if is_lambda:
+        yield source
 
 """
 TODO:
 
-1. check whitespace, linenos, attrs, multiline strings, e.g. the smaller details to clean up      - _clean_source_lines and others involved in _create_state
-i.e. the following need to be checked and cleaned up:
-control_flow_adjust
-temporary_loop_adjust
+1. finish the following:
+
+control_flow_adjust   - test to see if except does get included as a first line of a state (it shouldn't)
 _clean_source_lines
 _custom_adjust
+_loop_adjust
 
-2. consider named expressions e.g. (a:=...) in how it might effect i.e. extract_lambda/extract_genexpr among others potentially
+---------
+- other -
+---------
+ - use getcode and getframe for more generalizability
+ - use ctypes.pythonapi.PyLocals_to_Fast on the frame if needed
+ - check the linenos
+ - consider named expressions e.g. (a:=...) in how it might effect i.e. extract_lambda/extract_genexpr among others potentially
 
-3. format errors                                                               - throw
+2. format errors                                                               - throw
+3. add type checking and other methods that could be useful to users reasonable for generator functions
 4. write tests
 5. make an asynchronous verion? async generators have different attrs i.e. gi_frame is ag_frame
  - maybe make a preprocessor to rewrite some of the functions in Generator for ease of development
+   
+   also consider coroutines e.g. cr_code, cr_frame, etc.
 """
 class Generator(object):
     """
@@ -756,7 +794,7 @@ class Generator(object):
         ## running generator ##
         elif hasattr(FUNC,"gi_code"):
             if FUNC.gi_code.co_name=="<genexpr>": ## co_name is readonly e.g. can't be changed by user ##
-                self.source=genexpr_getsource(FUNC)
+                self.source=expr_getsource(FUNC)
                 ## cleaning the expression ##
                 self._source_lines=unpack_genexpr(self.source)
             else:
@@ -789,7 +827,7 @@ class Generator(object):
             ## generator function ##
             elif isinstance(FUNC,FunctionType):
                 if FUNC.__code__.co_name=="<lambda>":
-                    self.source=expr_getsource(FUNC,extract_lambda)
+                    self.source=expr_getsource(FUNC)
                 else:
                     self.source=getsource(FUNC)
                 self.gi_code=FUNC.__code__
@@ -905,6 +943,14 @@ class Generator(object):
         """Deserializing pickle (returns an instance of the object with state)"""
         Generator(state)
 
+    ## type checking for later ##
+
+    # def __instancecheck__(self, instance):
+    #     pass
+
+    # def __subclasscheck__(self, subclass):
+    #     if subclass==
+
 ## add the type annotations if the version is 3.5 or higher ##
 if (3,5) <= version_info:
     from typing import Callable,Any,NoReturn,Iterable,Generator as builtin_Generator,AsyncGenerator,Coroutine
@@ -928,14 +974,14 @@ if (3,5) <= version_info:
     ## expr_getsource ##
     code_attrs.__annotations__={"return":tuple[str,...]}
     attr_cmp.__annotations__={"obj1":object,"obj2":object,"attr":tuple[str,...],"return":bool}
-    expr_getsource.__annotations__={"gen":builtin_Generator,"return":str}
+    expr_getsource.__annotations__={"FUNC":FunctionType|builtin_Generator|AsyncGenerator|Coroutine,"return":str}
     getcode.__annotations__={"obj":FunctionType|builtin_Generator|AsyncGenerator|Coroutine,"return":CodeType}
     getframe.__annotations__={"obj":FunctionType|builtin_Generator|AsyncGenerator|Coroutine,"return":FrameType}
     ## genexpr ##
     extract_genexpr.__annotations__={"source_lines":list[str],"return":builtin_Generator}
     unpack_genexpr.__annotations__={"source":str,"return":list[str]}
     ## lambda ##
-    extract_lambda.__annotations__={"FUNC":FunctionType,"return":str}
+    extract_lambda.__annotations__={"source_code":str,"return":builtin_Generator}
     ### Generator ###
     Generator._custom_adjustment.__annotations__={"line":str,"lineno":int,"return":list[str]}
     Generator._clean_source_lines.__annotations__={"source":str,"return":list[str]}
