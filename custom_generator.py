@@ -504,7 +504,7 @@ TODO:
 
 control_flow_adjust - test to see if except does get included as a first line of a state (it shouldn't)
 _custom_adjustment  - check if 'yield from' send adjustment is correct and if you should do locals()['.i'] or f_locals
-_loop_adjust        - fix so that it works for nested loops and multiple loops in one loop block
+_loop_adjust        - clean up the changes made and how it effects temporary_loop_adjust and control_flow_adjust
 
 ---------
 - other -
@@ -681,6 +681,8 @@ class Generator(object):
         ## are not used by this generator (was only for formatting source code and 
         ## recording the jump positions needed in the for loop adjustments) ##
         del self._jump_stack,self._skip_indent
+        ## for the loop adjust to work efficiently ##
+        self._jump_cache=0
         return lines
 
     def _loop_adjust(self,lines):
@@ -694,49 +696,36 @@ class Generator(object):
         outermost nesting will be the final section that
         also contains the rest of the source lines as well
         """
-        ## jump_positions are in the form (start_lineno,end_lineno) ##
-        loops,end_pos,inner_positions=[],[],len(self._source_lines),None
-        positions=iter(self.jump_positions)
         ## get the outer loops that contian the current lineno ##
-        for pos in positions: ## importantly we go from start to finish to capture nesting loops ##
+        loops=[]
+        ## jump_positions are in the form (start_lineno,end_lineno) ##
+        for index,pos in enumerate(self.jump_positions[self._jump_cache:]): ## importantly we go from start to finish to capture nesting loops ##
             ## make sure the lineno is contained within the position for a ##
             ## loop adjustment and because the jump positions are ordered we ##
             ## can also break when the start lineno is beyond the current lineno ##
             if self.lineno < pos[0]:
-                ## check if it's an inner loop ##
-                while end_pos >= pos[1]:
-                    if 
-                    inner_positions+=[pos]
-                    next(positions)
                 break
             if self.lineno < pos[1]:
-                end_pos=pos[1]
                 loops+=[pos]
+        self._jump_cache=index
         if loops:
-            ## control flow adjust from the lineno up to the next inner for loop ##
-            if inner_positions:
-                temp1=control_flow_adjust(lines[:inner_positions[0]])
-                temp2=control_flow_adjust(lines[inner_positions[1]:end_pos])
-            else:
-                temp=control_flow_adjust(lines[:end_pos])
-            temp=["while True:"]+[" "*4+temporary_loop_adjust(line) for line in temp]+[" "*4+"break","if locals()['.continue']:"]
-            ## rest of the lines ##
-            lines=lines[end_pos:]
-            
-            ## starting from the end of loops ##
-            ## 1. get its source lines ##
-            ## 
-            
-            # ## make sure the break statement adjustment can work ##
-            # loops[-1]=["if locals()['.continue']:"]+[" "*4+line for line in loops[-1]]
-            # loops="\n".join("\n".join(loop) for loop in loops)
-            # ## adjust the current code block then return the combined result ##
-            # current_code=[]
-            # for line in control_flow_adjust(lines[:end_pos]):
-            #     ## we do it this way since you can get [...,...] which won't work as a list comprehension ##
-            #     current_code+=temporary_loop_adjust(line)
-            # current_code=["while True:"]+current_code+[" "*4+"break"]
-            # return "\n".join(current_code+loops)
+            blocks,temp_lineno="",self.lineno
+            while loops:
+                start_pos,end_pos=loops.pop()
+                reference_indent=get_indent(self._source_lines[start_pos])
+                if get_indent(self._source_lines[temp_lineno]) - reference_indent > 4:
+                    flag,temp_block=control_flow_adjust(self._source_lines[temp_lineno:end_pos],reference_indent) ## do we pass in a reference indent?
+                    if flag: ## indicates if any of the lines were equal to the reference indent ##
+                        flag,temp_block=temporary_loop_adjust(temp_block)
+                else: ## we shouldn't get an empty line otherwise this would be an error ##
+                    flag,temp_block=temporary_loop_adjust(temp_block)
+                if flag:
+                    temp_block=["while True:"]+temp_block+[" "*4+"break","if locals()['.continue']:"]
+                else:
+                    temp_block+=self._source_lines[start_pos:end_pos]
+                blocks+=temp_block
+                temp_lineno=end_pos
+            return "\n".join(blocks+self._source_lines[end_pos:])
         return "\n".join(control_flow_adjust(lines))
 
     def _create_state(self):
