@@ -79,7 +79,7 @@ def collect_multiline_string(iter_val,reference):
     line=""
     while True:
         # skip strings
-        index,temp_line=skip_string(iter_val,reference)
+        index,temp_line=collect_string(iter_val,reference)
         line+=temp_line
         indexes+=[index]
         if len(indexes) == 3:
@@ -89,7 +89,6 @@ def collect_multiline_string(iter_val,reference):
                 indexes=indexes[1:]
             else:
                 return index,line
-    raise SyntaxError("invalid syntax")    
 
 def track_iter(obj):
     """
@@ -152,7 +151,7 @@ else:
         return line.startswith("elif") or line.startswith("else") or line.startswith("case") or line.startswith("default")
 is_alternative_statement.__doc__="Checks if a line is an alternative statement"
 
-def control_flow_adjust(lines):
+def control_flow_adjust(lines,reference_indent=4):
     """
     removes unreachable control flow blocks that 
     will get in the way of the generators state
@@ -164,10 +163,12 @@ def control_flow_adjust(lines):
     It will also add 'try:' when there's an
     'except' line on the next minimum indent
     """
-    init_min,alternative=get_indent(lines[0]),is_alternative_statement(lines[0][4:])
-    if init_min == 4 and not alternative:
-        return lines
-    new_lines,current_min=[],init_min
+    flag,current_min,alternative=False,get_indent(lines[0]),is_alternative_statement(lines[0][4:])
+    if current_min == reference_indent:
+        flag=True
+        if not is_alternative_statement(lines[0][reference_indent:]):
+            return flag,lines
+    new_lines=[]
     for index,line in enumerate(lines): ## is having no lines possible? This should raise an error ##
         temp=get_indent(line)
         ## skip over all alternative statements until it's not an alternative statement ##
@@ -183,23 +184,35 @@ def control_flow_adjust(lines):
             alternative=is_alternative_statement(line[temp:])
         elif temp < current_min:
             current_min=temp
+            if current_min == reference_indent:
+                flag=True
             ## check for changes ##
             temp_line=line[temp:]
             if temp_line.startswith("except"):
-                new_lines=[" "*temp+"try:"]+new_lines+[line]
+                if current_min != reference_indent:
+                    new_lines=[" "*4+"try:"]+new_lines+[" "*4+line]
+                else:
+                    return flag,[" "*4+"try:"]+new_lines+[" "*4+line]+lines[index:]
                 continue
             alternative=is_alternative_statement(temp_line)
         if alternative:
             continue
-        ## add the line (adjust if indentation is not 4) ##
-        if current_min != 4:
-            new_lines+=[line[init_min-4:]] ## -4 adjusts the initial block to an indentation of 4 ##
+        ## add the line (adjust if indentation is not reference_indent) ##
+        if current_min != reference_indent:
+            new_lines+=[line[current_min-reference_indent-4:]] ## -reference_indent-4 adjusts the initial block to an indentation of reference_indent ##
         else:
-            return new_lines+line[index:]
-    return new_lines
+            return flag,new_lines+lines[current_min-4:][index:]
+    return flag,new_lines
 
-## shouldn't this be done to all subsequent blocks until the main block ?? ##
-def temporary_loop_adjust(line):
+def indent_lines(lines,indent=4):
+    """indents a list of strings acting as lines"""
+    if indent > 0:
+        return [" "*indent+line for line in lines]
+    if indent < 0:
+        return [line[get_indent(line)+indent:] for line in lines]
+    return lines
+
+def temporary_loop_adjust(lines,outer_loop):
     """
     Formats the current code block 
     being executed such that all the
@@ -210,14 +223,31 @@ def temporary_loop_adjust(line):
     flow statements by implementing a
     simple while loop and if statement
     """
-    indent=get_indent(line)
-    temp=line[indent:]
-    indent=" "*(indent+4) ## +4 since it's in a newly created block ##
-    if temp.startswith("continue"):
-        return indent+"break"
-    elif temp.startswith("break"):
-        return [indent+"locals()['.continue']=False",indent+"break"]
-    return " "*4+line
+    ## skip over for/while and definition blocks ##
+    new_lines,flag,lines=[],False,iter(lines)
+    for line in lines:
+        indent=get_indent(line)
+        temp_line=line[indent:]
+        ## skip loop and definition blocks ##
+        while temp_line.startswith("for") or temp_line.startswith("while") or temp_line.startswith("def") or temp_line.startswith("async def") or temp_line.startswith("class") or temp_line.startswith("async class"):
+            for line in lines:
+                temp_indent=get_indent(line)
+                if temp_indent <= indent:
+                    break
+                new_lines+=[line]
+            indent=temp_indent
+            temp_line=line[indent:]
+        if temp_line.startswith("continue"):
+            flag=True
+            new_lines+=["break"]
+        elif temp_line.startswith("break"):
+            flag=True
+            new_lines+=["locals()['.continue']=False","break"]
+        else:
+            new_lines+=[line]
+    if flag: ## we can't adjust the indent during since it's determined only once it hits a line that requires adjusting ##
+        return True,["while True:"]+indent_lines(new_lines)+["if locals()['.continue']:"]+indent_lines(outer_loop)
+    return False,new_lines+outer_loop
 
 def has_node(line,node):
     """Checks if a node has starting IDs that match"""
@@ -504,7 +534,8 @@ TODO:
 
 control_flow_adjust - test to see if except does get included as a first line of a state (it shouldn't)
 _custom_adjustment  - check if 'yield from' send adjustment is correct and if you should do locals()['.i'] or f_locals
-_loop_adjust        - clean up the changes made and how it effects temporary_loop_adjust and control_flow_adjust
+control_flow_adjust - indentation needs fixing so that it all ends in an indentation of 4
+_loop_adjust        - needs checking
 
 ---------
 - other -
@@ -513,6 +544,7 @@ _loop_adjust        - clean up the changes made and how it effects temporary_loo
  - use ctypes.pythonapi.PyLocals_to_Fast on the frame if needed
  - check the linenos
  - consider named expressions e.g. (a:=...) in how it might effect i.e. extract_lambda/extract_genexpr among others potentially
+ - fix the type annotations and docstrings since things might have changed
 
 2. format errors                                                               - throw
 3. add type checking and other methods that could be useful to users reasonable for generator functions
@@ -685,7 +717,26 @@ class Generator(object):
         self._jump_cache=0
         return lines
 
-    def _loop_adjust(self,lines):
+    def _get_loops(self):
+        """
+        returns a list of tuples (start_lineno,end_lineno) for the loop 
+        positions in the source code that encapsulate the current lineno
+        """
+        ## get the outer loops that contian the current lineno ##
+        loops,temp_lineno=[],self.lineno
+        ## jump_positions are in the form (start_lineno,end_lineno) ##
+        for index,pos in enumerate(self.jump_positions[self._jump_cache:]): ## importantly we go from start to finish to capture nesting loops ##
+            ## make sure the lineno is contained within the position for a ##
+            ## loop adjustment and because the jump positions are ordered we ##
+            ## can also break when the start lineno is beyond the current lineno ##
+            if temp_lineno < pos[0]:
+                break
+            if temp_lineno < pos[1]:
+                loops+=[pos]
+        self._jump_cache=index
+        return loops
+
+    def _loop_adjust(self):
         """
         adjusts source code about control flow statements
         so that it can be used in a single directional flow
@@ -696,20 +747,9 @@ class Generator(object):
         outermost nesting will be the final section that
         also contains the rest of the source lines as well
         """
-        ## get the outer loops that contian the current lineno ##
-        loops=[]
-        ## jump_positions are in the form (start_lineno,end_lineno) ##
-        for index,pos in enumerate(self.jump_positions[self._jump_cache:]): ## importantly we go from start to finish to capture nesting loops ##
-            ## make sure the lineno is contained within the position for a ##
-            ## loop adjustment and because the jump positions are ordered we ##
-            ## can also break when the start lineno is beyond the current lineno ##
-            if self.lineno < pos[0]:
-                break
-            if self.lineno < pos[1]:
-                loops+=[pos]
-        self._jump_cache=index
+        loops=self._get_loops()
         if loops:
-            blocks,temp_lineno="",self.lineno
+            blocks=""
             while loops:
                 start_pos,end_pos=loops.pop()
                 reference_indent=get_indent(self._source_lines[start_pos])
@@ -726,7 +766,7 @@ class Generator(object):
                 blocks+=temp_block
                 temp_lineno=end_pos
             return "\n".join(blocks+self._source_lines[end_pos:])
-        return "\n".join(control_flow_adjust(lines))
+        return "\n".join(control_flow_adjust(self._source_lines[temp_lineno:])[1])
 
     def _create_state(self):
         """
@@ -742,7 +782,7 @@ class Generator(object):
         """
         ## extract and adjust the code section ##
         self.lineno+=self.gi_frame.f_lineno-self.init_len
-        self.state=self._loop_adjust(self._source_lines[self.lineno:])
+        self.state=self._loop_adjust()
 
     ## try not to use variables here (otherwise it can mess with the state) ##
     init="""def next_state():
@@ -960,6 +1000,7 @@ if (3,5) <= version_info:
     is_alternative_statement.__annotations__={"line":str,"return":bool}
     ## code adjustments ##
     control_flow_adjust.__annotations__={"lines":list[str],"return":list[str]}
+    indent_lines.__annotations__={"lines":list[str],"indent":int,"return":list[str]}
     temporary_loop_adjust.__annotations__={"line":str,"return":list[str]}
     has_node.__annotations__={"line":str,"node":str,"return":bool}
     send_adjust.__annotations__={"line":str,"return":tuple[None|int,None|list[str,str]]}
@@ -977,7 +1018,8 @@ if (3,5) <= version_info:
     ### Generator ###
     Generator._custom_adjustment.__annotations__={"line":str,"lineno":int,"return":list[str]}
     Generator._clean_source_lines.__annotations__={"source":str,"return":list[str]}
-    Generator._loop_adjust.__annotations__={"lines":list[str],"return":str}
+    Generator._get_loops.__annotations__={"return":list[tuple[int,int]]}
+    Generator._loop_adjust.__annotations__={"return":str}
     Generator._create_state.__annotations__={"return":None}
     Generator.init_states.__annotations__={"return":Iterable}
     Generator.__init__.__annotations__={"FUNC":Callable|str|builtin_Generator|dict,"return":None}
