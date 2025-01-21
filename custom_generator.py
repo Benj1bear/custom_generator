@@ -537,6 +537,8 @@ _custom_adjustment  - check if 'yield from' send adjustment is correct and if yo
 control_flow_adjust - indentation needs fixing so that it all ends in an indentation of 4
 _loop_adjust        - needs checking
 
+2. create a linetable or include an enumerated list in the adjusters so that we can easily map the current line of the state to the lineno of the source
+
 ---------
 - other -
 ---------
@@ -546,10 +548,10 @@ _loop_adjust        - needs checking
  - consider named expressions e.g. (a:=...) in how it might effect i.e. extract_lambda/extract_genexpr among others potentially
  - fix the type annotations and docstrings since things might have changed
 
-2. format errors                                                               - throw
-3. add type checking and other methods that could be useful to users reasonable for generator functions
-4. write tests
-5. make an asynchronous verion? async generators have different attrs i.e. gi_frame is ag_frame
+3. format errors                                                               - throw
+4. add type checking and other methods that could be useful to users reasonable for generator functions
+5. write tests
+6. make an asynchronous verion? async generators have different attrs i.e. gi_frame is ag_frame
  - maybe make a preprocessor to rewrite some of the functions in Generator for ease of development
    
    also consider coroutines e.g. cr_code, cr_frame, etc.
@@ -713,8 +715,6 @@ class Generator(object):
         ## are not used by this generator (was only for formatting source code and 
         ## recording the jump positions needed in the for loop adjustments) ##
         del self._jump_stack,self._skip_indent
-        ## for the loop adjust to work efficiently ##
-        self._jump_cache=0
         return lines
 
     def _get_loops(self):
@@ -725,7 +725,7 @@ class Generator(object):
         ## get the outer loops that contian the current lineno ##
         loops,temp_lineno=[],self.lineno
         ## jump_positions are in the form (start_lineno,end_lineno) ##
-        for index,pos in enumerate(self.jump_positions[self._jump_cache:]): ## importantly we go from start to finish to capture nesting loops ##
+        for pos in self.jump_positions: ## importantly we go from start to finish to capture nesting loops ##
             ## make sure the lineno is contained within the position for a ##
             ## loop adjustment and because the jump positions are ordered we ##
             ## can also break when the start lineno is beyond the current lineno ##
@@ -733,11 +733,20 @@ class Generator(object):
                 break
             if temp_lineno < pos[1]:
                 loops+=[pos]
-        self._jump_cache=index
         return loops
 
-    def _loop_adjust(self):
+    def _create_state(self):
         """
+        creates a section of modified source code to be used in a 
+        function to act as a generators state
+
+        The approach is as follows:
+
+        Use the entire source code, reducing from the last lineno.
+        Adjust the current source code reduction further out of
+        control flow statements, loops, etc. then set the adjusted 
+        source code as the generators state
+
         adjusts source code about control flow statements
         so that it can be used in a single directional flow
         as the generators states
@@ -765,24 +774,9 @@ class Generator(object):
                     temp_block+=self._source_lines[start_pos:end_pos]
                 blocks+=temp_block
                 temp_lineno=end_pos
-            return "\n".join(blocks+self._source_lines[end_pos:])
-        return "\n".join(control_flow_adjust(self._source_lines[temp_lineno:])[1])
-
-    def _create_state(self):
-        """
-        creates a section of modified source code to be used in a 
-        function to act as a generators state
-
-        The approach is as follows:
-
-        Use the entire source code, reducing from the last lineno.
-        Adjust the current source code reduction further out of
-        control flow statements, loops, etc. then set the adjusted 
-        source code as the generators state
-        """
-        ## extract and adjust the code section ##
-        self.lineno+=self.gi_frame.f_lineno-self.init_len
-        self.state=self._loop_adjust()
+            self.state="\n".join(blocks+self._source_lines[end_pos:])
+            return
+        self.state="\n".join(control_flow_adjust(self._source_lines[temp_lineno:])[1])
 
     ## try not to use variables here (otherwise it can mess with the state) ##
     init="""def next_state():
@@ -872,8 +866,7 @@ class Generator(object):
             self.gi_frame=frame()
             self.gi_suspended=False
             self.gi_yieldfrom=None
-#         self.lineno=0
-#         self.gi_frame.f_lineno=self.init_len
+        self.lineno=0
         self.gi_running=False
         self.state=None
         self.state_generator=self.init_states()
@@ -921,8 +914,11 @@ class Generator(object):
             self.gi_running=True
             result=locals()["next_state"]()
             self.gi_running=False
+            ## update the line position ##
+            self.lineno=self.linetable[self.gi_frame.f_lineno-self.init_len]
             return result
         except Exception as e: ## we should format the exception as it normally would be formatted ideally
+            self.lineno=self.linetable[self.gi_frame.f_lineno-self.init_len] ## wouldn't have been reached ##
             self.throw(e)
 
     def send(self,arg):
@@ -1019,7 +1015,6 @@ if (3,5) <= version_info:
     Generator._custom_adjustment.__annotations__={"line":str,"lineno":int,"return":list[str]}
     Generator._clean_source_lines.__annotations__={"source":str,"return":list[str]}
     Generator._get_loops.__annotations__={"return":list[tuple[int,int]]}
-    Generator._loop_adjust.__annotations__={"return":str}
     Generator._create_state.__annotations__={"return":None}
     Generator.init_states.__annotations__={"return":Iterable}
     Generator.__init__.__annotations__={"FUNC":Callable|str|builtin_Generator|dict,"return":None}
