@@ -562,6 +562,8 @@ def extract_lambda(source_code):
 """
 TODO:
 
+general testing to make sure everything works before any more changes are made
+
 1. format errors - maybe edit or add to the exception traceback in __next__ so that the file and line number are correct
                  - with throw, extract the first line from self.state (for cpython) and then create an exception traceback out of that
                    (if wanting to port onto jupyter notebook you'd use the entire self._source_lines and then point to the lineno)
@@ -688,7 +690,7 @@ class Generator(object):
         ## for loop adjustments ##
         self.jump_positions,self._jump_stack,self._skip_indent,lineno=[],[],0,0
         ## setup source as an iterator and making sure the first indentation's correct ##
-        source=enumerate(self.source[get_indent(source):])
+        source=enumerate(self.source[get_indent(self.source):])
         line,lines,indented,space,indentation,prev=" "*4,[],False,0,4,(0,"")
         ## enumerate since I want the loop to use an iterator but the 
         ## index is needed to retain it for when it's used on get_indent
@@ -771,7 +773,8 @@ class Generator(object):
         outermost nesting will be the final section that
         also contains the rest of the source lines as well
         """
-        loops=get_loops(self.lineno,self.jump_positions)
+        temp_lineno=self.lineno
+        loops=get_loops(temp_lineno,self.jump_positions)
         if loops:
             blocks=""
             while loops:
@@ -843,6 +846,7 @@ class Generator(object):
                 self.source=expr_getsource(FUNC)
                 ## cleaning the expression ##
                 self._source_lines=unpack_genexpr(self.source)
+                self.lineno=len(self._source_lines)
             else:
                 self.source=getsource(FUNC.gi_code)
                 self._source_lines=self._clean_source_lines()
@@ -865,6 +869,7 @@ class Generator(object):
             else:
                 self.gi_yieldfrom=None
             self.gi_suspended=True
+            self.gi_frame=FUNC.gi_frame
         ## uninitialized generator ##
         else:
             ## source code string ##
@@ -1003,7 +1008,6 @@ if (3,5) <= version_info:
     from typing import Callable,Any,NoReturn,Iterable,Generator as builtin_Generator,AsyncGenerator,Coroutine
     from types import CodeType,FrameType
     ### utility functions ###
-    next.__annotations__={"iter_val":Iterable,"args":tuple[Any],"return":Any}
     frame.__init__.__annotations__={"frame":FrameType|None,"return":None}
     ## tracking ##
     track_iter.__annotations__={"obj":object,"return":Iterable}
