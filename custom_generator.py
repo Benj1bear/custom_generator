@@ -571,6 +571,8 @@ TODO:
 
 3. write tests
 control_flow_adjust - test to see if except does get included as a first line of a state (it shouldn't)
+need to test what happens when there are no lines e.g. empty lines or no state / EOF
+
 4. make an asynchronous verion? async generators have different attrs i.e. gi_frame is ag_frame
  - maybe make a preprocessor to rewrite some of the functions in Generator for ease of development
  - use getcode and getframe for more generalizability
@@ -581,6 +583,7 @@ control_flow_adjust - test to see if except does get included as a first line of
 ---------
  - use ctypes.pythonapi.PyLocals_to_Fast on the frame if needed
  - add type checking and other methods that could be useful to users reasonable for generator functions
+ - finish write up of documentation
 """
 class Generator(object):
     """
@@ -686,7 +689,7 @@ class Generator(object):
         self.jump_positions,self._jump_stack,self._skip_indent,lineno=[],[],0,0
         ## setup source as an iterator and making sure the first indentation's correct ##
         source=enumerate(self.source[get_indent(source):])
-        line,lines,indented,space,prev=" "*4,[],False,0,(0,"")
+        line,lines,indented,space,indentation,prev=" "*4,[],False,0,4,(0,"")
         ## enumerate since I want the loop to use an iterator but the 
         ## index is needed to retain it for when it's used on get_indent
         for index,char in source:
@@ -717,6 +720,7 @@ class Generator(object):
                 ## make sure to include it ##
                 if char==":":
                     line+=char
+                    indentation=get_indent(line) # in case of ';'
                 if not line.isspace(): ## empty lines are possible ##
                     if self._jump_stack:
                         reference_indent=get_indent(line)
@@ -725,14 +729,15 @@ class Generator(object):
                     lineno+=1
                     lines+=self._custom_adjustment(line,lineno)
                 ## start a new line ##
-                if char in ":;":
+                if char == ";":
                     indented=True # just in case
-                    line=" "*4
-                    ## skip the indents since these are variable ##
-                    skip(source,get_indent(self.source[index+1:]))
+                    line=" "*indentation
                 else:
                     indented=False
                     line=""
+                if char in ":;":
+                    ## skip the indents since these are variable ##
+                    skip(source,get_indent(self.source[index+1:]))
             else:
                 line+=char
         ## in case you get a for loop at the end and you haven't got the end jump_position ##
@@ -842,7 +847,7 @@ class Generator(object):
                 self.source=getsource(FUNC.gi_code)
                 self._source_lines=self._clean_source_lines()
                 """
-                TODO: 
+                TODO:
                 running function generators will need something in 
                 place for compound statements since only version
                 3.11 and higher has co_positions and there's no 
