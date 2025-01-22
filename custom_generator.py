@@ -173,14 +173,9 @@ def control_flow_adjust(lines,indexes,reference_indent=4):
         temp=get_indent(line)
         ## skip over all alternative statements until it's not an alternative statement ##
         if alternative and temp > current_min:
+            del indexes[index]
             continue
         elif temp == current_min:
-            ## this needs to be checked in case we need to remove an except statement if it shows up
-            ##  on the first instance 
-            ## I'm thinking that it shouldn't happen since the line should go into the except
-            ## block rather than the statement
-            # if temp_line.startswith("except"):
-            #     continue
             alternative=is_alternative_statement(line[temp:])
         elif temp < current_min:
             current_min=temp
@@ -197,10 +192,10 @@ def control_flow_adjust(lines,indexes,reference_indent=4):
                 continue
             alternative=is_alternative_statement(temp_line)
         if alternative:
+            del indexes[index]
             continue
         ## add the line (adjust if indentation is not reference_indent) ##
         if current_min != reference_indent:
-            indexes=
             new_lines+=[line[current_min-reference_indent-4:]] ## -reference_indent-4 adjusts the initial block to an indentation of reference_indent ##
         else:
             return flag,new_lines+indent_lines(lines[index:],4-current_min),indexes
