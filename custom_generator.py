@@ -103,6 +103,34 @@ def decref(key):
 ############################
 ### cleaning source code ###
 ############################
+
+def skip_source_definition(source):
+    """Skips the function definition and decorators in the source code"""
+    ID,source_iter="",enumerate(source)
+    for index,char in source_iter:
+        ## decorators are ignored ##
+        while char=="@":
+            while char!="\n":
+                index,char=next(source)
+            index,char=next(source)
+        if char.isalnum():
+            ID+=char
+            if ID=="def" and next(source)[1]==" ":
+                while char!="(":
+                    index,char=next(source)
+                break
+        else:
+            ID=""
+    depth=1
+    for index,char in source_iter:
+        if char==":" and depth==0:
+            return source[index:]
+        if char in "([{":
+            depth+=1
+        elif char in ")]}":
+            depth-=1
+    raise SyntaxError("Unexpected format encountered")
+
 def collect_string(iter_val,reference):
     """
     Skips strings in an iterable assuming correct python 
@@ -690,7 +718,8 @@ class Generator(object):
         ## for loop adjustments ##
         self.jump_positions,self._jump_stack,self._skip_indent,lineno=[],[],0,0
         ## setup source as an iterator and making sure the first indentation's correct ##
-        source=enumerate(self.source[get_indent(self.source):])
+        source=skip_source_definition(self.source)
+        source=enumerate(source[get_indent(source):])
         line,lines,indented,space,indentation,prev=" "*4,[],False,0,4,(0,"")
         ## enumerate since I want the loop to use an iterator but the 
         ## index is needed to retain it for when it's used on get_indent
@@ -1014,6 +1043,7 @@ if (3,5) <= version_info:
     untrack_iters.__annotations__={"return":None}
     decref.__annotations__={"key":str,"return":None}
     ## cleaning source code ##
+    skip_source_definition.__annotations__={"source":str,"return":str}
     collect_string.__annotations__={"iter_val":enumerate,"reference":str,"return":str}
     collect_multiline_string.__annotations__={"iter_val":enumerate,"reference":str,"return":str}
     get_indent.__annotations__={"line":str,"return":int}
