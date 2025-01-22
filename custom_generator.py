@@ -29,7 +29,9 @@ from inspect import getsource,currentframe,findsource
 import ctypes
 from copy import deepcopy,copy
 from sys import version_info
-
+#########################
+### utility functions ###
+#########################
 ## python 2 compatibility ##
 if version_info < (3,):
     range = xrange
@@ -49,6 +51,58 @@ if version_info < (2,6):
                 return args[0]
         return iter_val.next()
 
+class frame(object):
+    """acts as the initial FrameType"""
+    f_locals={".send":None}
+    f_lineno=0
+
+    def __init__(self,frame=None):
+        if frame:
+            for attr in dir(frame):
+                if not attr.startswith("_"):
+                    setattr(self,attr,getattr(frame,attr))
+################
+### tracking ###
+################
+def track_iter(obj):
+    """
+    Tracks an iterator in the local scope initiated by a for loop
+    
+    This function has a specific use case where the initialization
+    of an iterator via a for loop implictely does not allow for 
+    reliable extraction from the garbage collector and thus manually
+    assigning the iterator for tracking is used
+    """
+    obj=iter(obj)
+    f_locals=currentframe().f_back.f_locals
+    if not isinstance(f_locals.get(".count",None),int):
+        f_locals[".count"]=0
+    key=".%s" % f_locals[".count"]
+    while key in f_locals:
+        f_locals[".count"]+=1
+        key=".%s" % f_locals[".count"]
+    f_locals[key]=obj
+    return obj
+
+# if needed (generator expressions won't need this functions or other things in __main__ may)
+def untrack_iters():
+    """removes all currently tracked iterators on the current frame"""
+    f_locals=currentframe().f_back.f_locals
+    for i in range(f_locals[".count"]):
+        del f_locals[".%s" % i]
+    del f_locals[".count"]
+
+def decref(key):
+    """decrease the tracking count and delete the current key"""
+    f_locals=currentframe().f_back.f_locals
+    del f_locals[".%s" % key]
+    if f_locals[".count"]==0:
+        del f_locals[".count"]
+    else:
+        f_locals[".count"]-=1
+############################
+### cleaning source code ###
+############################
 def collect_string(iter_val,reference):
     """
     Skips strings in an iterable assuming correct python 
@@ -90,43 +144,6 @@ def collect_multiline_string(iter_val,reference):
             else:
                 return index,line
 
-def track_iter(obj):
-    """
-    Tracks an iterator in the local scope initiated by a for loop
-    
-    This function has a specific use case where the initialization
-    of an iterator via a for loop implictely does not allow for 
-    reliable extraction from the garbage collector and thus manually
-    assigning the iterator for tracking is used
-    """
-    obj=iter(obj)
-    f_locals=currentframe().f_back.f_locals
-    if not isinstance(f_locals.get(".count",None),int):
-        f_locals[".count"]=0
-    key=".%s" % f_locals[".count"]
-    while key in f_locals:
-        f_locals[".count"]+=1
-        key=".%s" % f_locals[".count"]
-    f_locals[key]=obj
-    return obj
-
-# if needed (generator expressions won't need this functions or other things in __main__ may)
-def untrack_iters():
-    """removes all currently tracked iterators on the current frame"""
-    f_locals=currentframe().f_back.f_locals
-    for i in range(f_locals[".count"]):
-        del f_locals[".%s" % i]
-    del f_locals[".count"]
-
-def decref(key):
-    """decrease the tracking count and delete the current key"""
-    f_locals=currentframe().f_back.f_locals
-    del f_locals[".%s" % key]
-    if f_locals[".count"]==0:
-        del f_locals[".count"]
-    else:
-        f_locals[".count"]-=1
-    
 def get_indent(line):
     """Gets the number of spaces used in an indentation"""
     count=0
@@ -150,7 +167,9 @@ else:
     def is_alternative_statement(line):
         return line.startswith("elif") or line.startswith("else") or line.startswith("case") or line.startswith("default")
 is_alternative_statement.__doc__="Checks if a line is an alternative statement"
-
+########################
+### code adjustments ###
+########################
 def skip_alternative_statements(line_iter):
     """Skips all alternative statements for the control flow adjustment"""
     for index,line in line_iter:
@@ -299,18 +318,9 @@ def get_loops(lineno,jump_positions):
         if lineno < pos[1]:
             loops+=[pos]
     return loops
-
-class frame(object):
-    """acts as the initial FrameType"""
-    f_locals={".send":None}
-    f_lineno=0
-
-    def __init__(self,frame=None):
-        if frame:
-            for attr in dir(frame):
-                if not attr.startswith("_"):
-                    setattr(self,attr,getattr(frame,attr))
-
+######################
+### expr_getsource ###
+######################
 def code_attrs():
     """
     all the attrs used by a CodeType object in 
@@ -407,7 +417,9 @@ def expr_getsource(FUNC):
         except:
             pass
     raise Exception("No matches to the original source code found")
-
+###############
+### genexpr ###
+###############
 def extract_genexpr(source_lines):
     """Extracts each generator expression from a list of the source code lines"""
     source,ID,is_genexpr,number_of_expressions,depth,prev="","",False,0,0,(0,"")
@@ -499,7 +511,9 @@ def unpack_genexpr(source):
            [indent*(index)+line for index,line in enumerate(if_blocks,start=len(lines)+1)]+\
            [indent*(index)+'decref(".%s")' % (index-1) for index in range(len(lines),1,-1)]
            ## we don't need to do '.0' here since it will be the end of the function e.g. it'll get garbage collected
-
+##############
+### lambda ###
+##############
 def extract_lambda(source_code):
     """Extracts each lambda expression from the source code string"""
     source,ID,is_lambda,lambda_depth,prev="","",False,0,(0,"")
@@ -542,7 +556,9 @@ def extract_lambda(source_code):
     ## in case of a current match ending ##
     if is_lambda:
         yield source
-
+#################
+### Generator ###
+#################
 """
 TODO:
 
@@ -983,13 +999,14 @@ if (3,5) <= version_info:
     from types import CodeType,FrameType
     ### utility functions ###
     next.__annotations__={"iter_val":Iterable,"args":tuple[Any],"return":Any}
-    collect_string.__annotations__={"iter_val":enumerate,"reference":str,"return":str}
-    collect_multiline_string.__annotations__={"iter_val":enumerate,"reference":str,"return":str}
+    frame.__init__.__annotations__={"frame":FrameType|None,"return":None}
     ## tracking ##
     track_iter.__annotations__={"obj":object,"return":Iterable}
     untrack_iters.__annotations__={"return":None}
     decref.__annotations__={"key":str,"return":None}
     ## cleaning source code ##
+    collect_string.__annotations__={"iter_val":enumerate,"reference":str,"return":str}
+    collect_multiline_string.__annotations__={"iter_val":enumerate,"reference":str,"return":str}
     get_indent.__annotations__={"line":str,"return":int}
     skip.__annotations__={"iter_val":Iterable,"n":int,"return":None}
     is_alternative_statement.__annotations__={"line":str,"return":bool}
@@ -1001,7 +1018,6 @@ if (3,5) <= version_info:
     has_node.__annotations__={"line":str,"node":str,"return":bool}
     send_adjust.__annotations__={"line":str,"return":tuple[None|int,None|list[str,str]]}
     get_loops.__annotations__={"lineno":int,"jump_positions":list[tuple[int,int]],"return":list[tuple[int,int]]}
-    frame.__init__.__annotations__={"frame":FrameType|None,"return":None}
     ## expr_getsource ##
     code_attrs.__annotations__={"return":tuple[str,...]}
     attr_cmp.__annotations__={"obj1":object,"obj2":object,"attr":tuple[str,...],"return":bool}
