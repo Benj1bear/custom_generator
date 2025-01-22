@@ -280,9 +280,30 @@ def send_adjust(line):
             flag=2
             break
     if flag:
+        reciever="="
+        if flag == 2:
+            reciever+="locals()['.send']"
         ## indicator       yield statement            assignments
-        return flag,["=".join(parts[index:]),"=".join(parts[:index])+"=locals()['.send']"]
+        return flag,["=".join(parts[index:]),"=".join(parts[:index])+reciever]
     return None,None
+
+def get_loops(lineno,jump_positions):
+    """
+    returns a list of tuples (start_lineno,end_lineno) for the loop 
+    positions in the source code that encapsulate the current lineno
+    """
+    ## get the outer loops that contian the current lineno ##
+    loops=[]
+    ## jump_positions are in the form (start_lineno,end_lineno) ##
+    for pos in jump_positions: ## importantly we go from start to finish to capture nesting loops ##
+        ## make sure the lineno is contained within the position for a ##
+        ## loop adjustment and because the jump positions are ordered we ##
+        ## can also break when the start lineno is beyond the current lineno ##
+        if lineno < pos[0]:
+            break
+        if lineno < pos[1]:
+            loops+=[pos]
+    return loops
 
 class frame(object):
     """acts as the initial FrameType"""
@@ -532,8 +553,6 @@ TODO:
 
 1. finish the following:
 
-control_flow_adjust - test to see if except does get included as a first line of a state (it shouldn't)
-_custom_adjustment  - check if 'yield from' send adjustment is correct and if you should do locals()['.i'] or f_locals
 control_flow_adjust - indentation needs fixing so that it all ends in an indentation of 4
 _loop_adjust        - needs checking
 
@@ -544,13 +563,16 @@ _loop_adjust        - needs checking
 ---------
  - use getcode and getframe for more generalizability
  - use ctypes.pythonapi.PyLocals_to_Fast on the frame if needed
- - check the linenos
  - consider named expressions e.g. (a:=...) in how it might effect i.e. extract_lambda/extract_genexpr among others potentially
+   also consider how brackets could mess with extract_genexpr and extract_lambda
  - fix the type annotations and docstrings since things might have changed
 
-3. format errors                                                               - throw
+3. format errors - maybe edit or add to the exception traceback in __next__ so that the file and line number are correct
+                 - with throw, extract the first line from self.state (for cpython) and then create an exception traceback out of that
+                   (if wanting to port onto jupyter notebook you'd use the entire self._source_lines and then point to the lineno)
 4. add type checking and other methods that could be useful to users reasonable for generator functions
 5. write tests
+control_flow_adjust - test to see if except does get included as a first line of a state (it shouldn't)
 6. make an asynchronous verion? async generators have different attrs i.e. gi_frame is ag_frame
  - maybe make a preprocessor to rewrite some of the functions in Generator for ease of development
    
@@ -611,7 +633,6 @@ class Generator(object):
                 self._skip_indent=0
                 indent=" "*number_of_indents
                 if temp_line.startswith("yield from "):
-                    ## will locals()['.i'] suffice? or does it have to be f_locals??? ##
                     return [indent+"currentframe().f_back.f_locals['.yieldfrom']="+temp_line[11:],
                             indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
                             indent+"    return currentframe().f_back.f_locals['.i']"]
@@ -626,14 +647,16 @@ class Generator(object):
                 ## handles the .send method ##
                 flag,adjustment=send_adjust(line)
                 if flag:
-                    if flag==1:
+                    if flag==2:
                         ## 5: to get past the 'yield'
-                        return [indent+"return"+adjustment[0][5:]]+adjustment[1]
+                        return [indent+"return"+adjustment[0][5:],
+                                indent+adjustment[1]]
                     else:
                         ## 11: to get past the 'yield from'
                         return [indent+"currentframe().f_back.f_locals['.yieldfrom']="+adjustment[0][11:],
                                 indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
-                                indent+"    return currentframe().f_back.f_locals['.i']"]+adjustment[1]
+                                indent+"    return currentframe().f_back.f_locals['.i']",
+                                indent+"    %scurrentframe().f_back.f_locals['.yieldfrom'].send(currentframe().f_back.f_locals['.send'])" % adjustment[1]]
         return [line]
 
     def _clean_source_lines(self):
@@ -717,24 +740,6 @@ class Generator(object):
         del self._jump_stack,self._skip_indent
         return lines
 
-    def _get_loops(self):
-        """
-        returns a list of tuples (start_lineno,end_lineno) for the loop 
-        positions in the source code that encapsulate the current lineno
-        """
-        ## get the outer loops that contian the current lineno ##
-        loops,temp_lineno=[],self.lineno
-        ## jump_positions are in the form (start_lineno,end_lineno) ##
-        for pos in self.jump_positions: ## importantly we go from start to finish to capture nesting loops ##
-            ## make sure the lineno is contained within the position for a ##
-            ## loop adjustment and because the jump positions are ordered we ##
-            ## can also break when the start lineno is beyond the current lineno ##
-            if temp_lineno < pos[0]:
-                break
-            if temp_lineno < pos[1]:
-                loops+=[pos]
-        return loops
-
     def _create_state(self):
         """
         creates a section of modified source code to be used in a 
@@ -756,7 +761,7 @@ class Generator(object):
         outermost nesting will be the final section that
         also contains the rest of the source lines as well
         """
-        loops=self._get_loops()
+        loops=get_loops(self.lineno,self.jump_positions)
         if loops:
             blocks=""
             while loops:
@@ -775,15 +780,16 @@ class Generator(object):
                 blocks+=temp_block
                 temp_lineno=end_pos
             self.state="\n".join(blocks+self._source_lines[end_pos:])
+            self.linetable=[] ## TODO
             return
         self.state="\n".join(control_flow_adjust(self._source_lines[temp_lineno:])[1])
+        self.linetable=[] ## TODO
 
     ## try not to use variables here (otherwise it can mess with the state) ##
     init="""def next_state():
     locals().update(currentframe().f_back.f_locals['self'].gi_frame.f_locals)
     currentframe().f_back.f_locals['self'].gi_frame=currentframe()
-    ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(currentframe().f_back), ctypes.c_int(0))
-"""
+    ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(currentframe().f_back), ctypes.c_int(0))"""
     init_len=init.count("\n")+1
 
     def init_states(self):
@@ -825,6 +831,8 @@ class Generator(object):
                 ## cleaning the expression ##
                 self._source_lines=unpack_genexpr(self.source)
             else:
+                self.source=getsource(FUNC.gi_code)
+                self._source_lines=self._clean_source_lines()
                 """
                 TODO: 
                 running function generators will need something in 
@@ -836,8 +844,7 @@ class Generator(object):
                 Therefore, already running generators can skip
                 the ';' when cleaning source lines potentially
                 """
-                self.source=getsource(FUNC.gi_code)
-                self._source_lines=self._clean_source_lines()
+                self.lineno=FUNC.gi_frame.f_lineno ## is incorrect but needs figuring out ##
             self.gi_code=FUNC.gi_code
             ## 'gi_yieldfrom' was introduced in python version 3.5 and yield from ... in 3.3 ##
             if hasattr(FUNC,"gi_yieldfrom"):
@@ -866,7 +873,7 @@ class Generator(object):
             self.gi_frame=frame()
             self.gi_suspended=False
             self.gi_yieldfrom=None
-        self.lineno=0
+            self.lineno=0
         self.gi_running=False
         self.state=None
         self.state_generator=self.init_states()
@@ -910,24 +917,19 @@ class Generator(object):
         next(self.state_generator) ## it will raise a StopIteration for us
         ## update with the new state and get the frame ##
         exec(self.init+self.state,globals(),locals())
-        try: # get the locals dict, update the line position, and return the result
-            self.gi_running=True
-            result=locals()["next_state"]()
-            self.gi_running=False
-            ## update the line position ##
-            self.lineno=self.linetable[self.gi_frame.f_lineno-self.init_len]
-            return result
-        except Exception as e: ## we should format the exception as it normally would be formatted ideally
-            self.lineno=self.linetable[self.gi_frame.f_lineno-self.init_len] ## wouldn't have been reached ##
-            self.throw(e)
+        self.gi_running=True
+        ## if an error does occur it will be formatted correctly in cpython (just incorrect frame and line number) ##
+        result=locals()["next_state"]()
+        self.gi_running=False
+        ## update the line position ##
+        self.lineno=self.linetable[self.gi_frame.f_lineno-self.init_len]
+        return result
 
     def send(self,arg):
         """
         Send takes exactly one arguement 'arg' that 
         is sent to the functions yield variable
         """
-        if self.gi_yieldfrom:
-            return self.gi_yieldfrom.send(arg)
         if not self.gi_running:
             raise TypeError("can't send non-None value to a just-started generator")
         if self.reciever:
@@ -942,7 +944,10 @@ class Generator(object):
         self.gi_suspended=False
 
     def throw(self,exception):
-        """Raises an exception from the last line in the current state e.g. only from what has been"""
+        """
+        Raises an exception from the last line in the 
+        current state e.g. only from what has been
+        """
         raise exception
 
     def _copier(self,FUNC):
@@ -1000,6 +1005,7 @@ if (3,5) <= version_info:
     temporary_loop_adjust.__annotations__={"line":str,"return":list[str]}
     has_node.__annotations__={"line":str,"node":str,"return":bool}
     send_adjust.__annotations__={"line":str,"return":tuple[None|int,None|list[str,str]]}
+    get_loops.__annotations__={"lineno":int,"jump_positions":list[tuple[int,int]],"return":list[tuple[int,int]]}
     ## expr_getsource ##
     code_attrs.__annotations__={"return":tuple[str,...]}
     attr_cmp.__annotations__={"obj1":object,"obj2":object,"attr":tuple[str,...],"return":bool}
@@ -1014,7 +1020,6 @@ if (3,5) <= version_info:
     ### Generator ###
     Generator._custom_adjustment.__annotations__={"line":str,"lineno":int,"return":list[str]}
     Generator._clean_source_lines.__annotations__={"source":str,"return":list[str]}
-    Generator._get_loops.__annotations__={"return":list[tuple[int,int]]}
     Generator._create_state.__annotations__={"return":None}
     Generator.init_states.__annotations__={"return":Iterable}
     Generator.__init__.__annotations__={"FUNC":Callable|str|builtin_Generator|dict,"return":None}
