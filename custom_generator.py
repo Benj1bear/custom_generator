@@ -667,7 +667,7 @@ class Generator(object):
         _skip_indent: the indent level of a definition being defined (definitions shouldn't be adjusted)
         """
         ## for loop adjustments ##
-        self.jump_positions,self._jump_stack,self._skip_indent=[],[],0
+        self.jump_positions,self._jump_stack,self._skip_indent,lineno=[],[],0,0
         ## setup source as an iterator and making sure the first indentation's correct ##
         source=enumerate(self.source[get_indent(source):])
         line,lines,indented,space,prev=" "*4,[],False,0,(0,"")
@@ -706,7 +706,8 @@ class Generator(object):
                         reference_indent=get_indent(line)
                         while self._jump_stack and reference_indent <= self._jump_stack[-1][0]: # -1: top of stack, 0: start lineno
                             self.jump_positions[self._jump_stack.pop()[1]][1]=len(lines)+1 ## +1 assuming exclusion slicing on the stop index ##
-                    lines+=self._custom_adjustment(line)
+                    lineno+=1
+                    lines+=self._custom_adjustment(line,lineno)
                 ## start a new line ##
                 if char in ":;":
                     indented=True # just in case
@@ -981,29 +982,32 @@ if (3,5) <= version_info:
     from typing import Callable,Any,NoReturn,Iterable,Generator as builtin_Generator,AsyncGenerator,Coroutine
     from types import CodeType,FrameType
     ### utility functions ###
-    collect_string.__annotations__={"iter_val":Iterable,"reference":str,"return":str}
-    collect_multiline_string.__annotations__={"iter_val":Iterable,"reference":str,"return":str}
+    next.__annotations__={"iter_val":Iterable,"args":tuple[Any],"return":Any}
+    collect_string.__annotations__={"iter_val":enumerate,"reference":str,"return":str}
+    collect_multiline_string.__annotations__={"iter_val":enumerate,"reference":str,"return":str}
     ## tracking ##
-    track_iter.__annotations__={"obj":object,"return":object}
+    track_iter.__annotations__={"obj":object,"return":Iterable}
     untrack_iters.__annotations__={"return":None}
+    decref.__annotations__={"key":str,"return":None}
     ## cleaning source code ##
     get_indent.__annotations__={"line":str,"return":int}
     skip.__annotations__={"iter_val":Iterable,"n":int,"return":None}
     is_alternative_statement.__annotations__={"line":str,"return":bool}
     ## code adjustments ##
-    skip_alternative_statements.__annotations__={"line_iter":Iterable,"return":tuple[int,str,int]}
+    skip_alternative_statements.__annotations__={"line_iter":enumerate,"return":tuple[int,str,int]}
     control_flow_adjust.__annotations__={"lines":list[str],"indexes":list[int],"return":tuple[bool,list[str],list[int]]}
     indent_lines.__annotations__={"lines":list[str],"indent":int,"return":list[str]}
-    temporary_loop_adjust.__annotations__={"line":str,"indexes":list[int],"outer_loop":list[str],"pos":tuple,"return":tuple[list[str],list[int]]}
+    temporary_loop_adjust.__annotations__={"lines":list[str],"indexes":list[int],"outer_loop":list[str],"pos":tuple[int,int],"return":tuple[list[str],list[int]]}
     has_node.__annotations__={"line":str,"node":str,"return":bool}
     send_adjust.__annotations__={"line":str,"return":tuple[None|int,None|list[str,str]]}
     get_loops.__annotations__={"lineno":int,"jump_positions":list[tuple[int,int]],"return":list[tuple[int,int]]}
+    frame.__init__.__annotations__={"frame":FrameType|None,"return":None}
     ## expr_getsource ##
     code_attrs.__annotations__={"return":tuple[str,...]}
     attr_cmp.__annotations__={"obj1":object,"obj2":object,"attr":tuple[str,...],"return":bool}
-    expr_getsource.__annotations__={"FUNC":FunctionType|builtin_Generator|AsyncGenerator|Coroutine,"return":str}
     getcode.__annotations__={"obj":FunctionType|builtin_Generator|AsyncGenerator|Coroutine,"return":CodeType}
     getframe.__annotations__={"obj":FunctionType|builtin_Generator|AsyncGenerator|Coroutine,"return":FrameType}
+    expr_getsource.__annotations__={"FUNC":FunctionType|builtin_Generator|AsyncGenerator|Coroutine,"return":str}
     ## genexpr ##
     extract_genexpr.__annotations__={"source_lines":list[str],"return":builtin_Generator}
     unpack_genexpr.__annotations__={"source":str,"return":list[str]}
