@@ -565,22 +565,22 @@ TODO:
 1. format errors - maybe edit or add to the exception traceback in __next__ so that the file and line number are correct
                  - with throw, extract the first line from self.state (for cpython) and then create an exception traceback out of that
                    (if wanting to port onto jupyter notebook you'd use the entire self._source_lines and then point to the lineno)
-2. add type checking and other methods that could be useful to users reasonable for generator functions
+
+2. consider named expressions e.g. (a:=...) in how it might effect i.e. extract_lambda/extract_genexpr among others potentially
+   also consider how brackets could mess with extract_genexpr and extract_lambda
+
 3. write tests
 control_flow_adjust - test to see if except does get included as a first line of a state (it shouldn't)
 4. make an asynchronous verion? async generators have different attrs i.e. gi_frame is ag_frame
  - maybe make a preprocessor to rewrite some of the functions in Generator for ease of development
-   
+ - use getcode and getframe for more generalizability
    also consider coroutines e.g. cr_code, cr_frame, etc.
 
 ---------
 - other -
 ---------
- - use getcode and getframe for more generalizability
  - use ctypes.pythonapi.PyLocals_to_Fast on the frame if needed
- - consider named expressions e.g. (a:=...) in how it might effect i.e. extract_lambda/extract_genexpr among others potentially
-   also consider how brackets could mess with extract_genexpr and extract_lambda
- - fix the type annotations and docstrings since things might have changed
+ - add type checking and other methods that could be useful to users reasonable for generator functions
 """
 class Generator(object):
     """
