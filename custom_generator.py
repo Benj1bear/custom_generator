@@ -151,6 +151,15 @@ else:
         return line.startswith("elif") or line.startswith("else") or line.startswith("case") or line.startswith("default")
 is_alternative_statement.__doc__="Checks if a line is an alternative statement"
 
+def skip_alternative_statements(line_iter):
+    """Skips all alternative statements for the control flow adjustment"""
+    for index,line in line_iter:
+        temp_indent=get_indent(line)
+        temp_line=line[temp_indent:]
+        if not is_alternative_statement(temp_line):
+            break
+    return index,line,temp_indent
+
 def control_flow_adjust(lines,indexes,reference_indent=4):
     """
     removes unreachable control flow blocks that 
@@ -163,42 +172,29 @@ def control_flow_adjust(lines,indexes,reference_indent=4):
     It will also add 'try:' when there's an
     'except' line on the next minimum indent
     """
-    flag,current_min,alternative=False,get_indent(lines[0]),is_alternative_statement(lines[0][4:])
-    if current_min == reference_indent:
-        flag=True
-        if not is_alternative_statement(lines[0][reference_indent:]):
-            return flag,lines,indexes
-    new_lines=[]
-    for index,line in enumerate(lines): ## is having no lines possible? This should raise an error ##
-        temp=get_indent(line)
+    new_lines,flag,current_min=[],False,get_indent(lines[0])
+    line_iter=enumerate(lines)
+    for index,line in line_iter:
+        temp_indent=get_indent(line)
+        temp_line=line[temp_indent:]
         ## skip over all alternative statements until it's not an alternative statement ##
-        if alternative and temp > current_min:
-            del indexes[index]
-            continue
-        elif temp == current_min:
-            alternative=is_alternative_statement(line[temp:])
-        elif temp < current_min:
-            current_min=temp
+        if is_alternative_statement(temp_line):
+            end_index,line,temp_indent=skip_alternative_statements(line_iter)
+            del indexes[index:end_index]
+            index=end_index
+        if temp_indent < current_min:
+            current_min=temp_indent
             if current_min == reference_indent:
                 flag=True
-            ## check for changes ##
-            temp_line=line[temp:]
             if temp_line.startswith("except"):
-                if current_min != reference_indent:
-                    new_lines=[" "*4+"try:"]+new_lines+[" "*4+line]
-                    indexes=[indexes[0]]+indexes
-                else:
-                    return flag,[" "*4+"try:"]+new_lines+[" "*4+line]+indent_lines(lines[index:],4-current_min),[indexes[0]]+indexes
-                continue
-            alternative=is_alternative_statement(temp_line)
-        if alternative:
-            del indexes[index]
-            continue
+                new_lines=[" "*4+"try:"]+indent_lines(new_lines)+[line[current_min-4:]]
+                indexes=[indexes[0]]+indexes
         ## add the line (adjust if indentation is not reference_indent) ##
         if current_min != reference_indent:
-            new_lines+=[line[current_min-reference_indent-4:]] ## -reference_indent-4 adjusts the initial block to an indentation of reference_indent ##
+            ## adjust using the current_min until it's the same as reference_indent ##
+            new_lines+=[line[current_min-4:]]
         else:
-            return flag,new_lines+indent_lines(lines[index:],4-current_min),indexes
+            return flag,new_lines+indent_lines(lines[index:],4-reference_indent),indexes
     return flag,new_lines,indexes
 
 def indent_lines(lines,indent=4):
@@ -550,11 +546,16 @@ def extract_lambda(source_code):
 """
 TODO:
 
-1. finish the following:
-
-control_flow_adjust   - indentation and indexes need fixing
-
-2. create a linetable or include an enumerated list in the adjusters so that we can easily map the current line of the state to the lineno of the source
+1. format errors - maybe edit or add to the exception traceback in __next__ so that the file and line number are correct
+                 - with throw, extract the first line from self.state (for cpython) and then create an exception traceback out of that
+                   (if wanting to port onto jupyter notebook you'd use the entire self._source_lines and then point to the lineno)
+2. add type checking and other methods that could be useful to users reasonable for generator functions
+3. write tests
+control_flow_adjust - test to see if except does get included as a first line of a state (it shouldn't)
+4. make an asynchronous verion? async generators have different attrs i.e. gi_frame is ag_frame
+ - maybe make a preprocessor to rewrite some of the functions in Generator for ease of development
+   
+   also consider coroutines e.g. cr_code, cr_frame, etc.
 
 ---------
 - other -
@@ -564,17 +565,6 @@ control_flow_adjust   - indentation and indexes need fixing
  - consider named expressions e.g. (a:=...) in how it might effect i.e. extract_lambda/extract_genexpr among others potentially
    also consider how brackets could mess with extract_genexpr and extract_lambda
  - fix the type annotations and docstrings since things might have changed
-
-3. format errors - maybe edit or add to the exception traceback in __next__ so that the file and line number are correct
-                 - with throw, extract the first line from self.state (for cpython) and then create an exception traceback out of that
-                   (if wanting to port onto jupyter notebook you'd use the entire self._source_lines and then point to the lineno)
-4. add type checking and other methods that could be useful to users reasonable for generator functions
-5. write tests
-control_flow_adjust - test to see if except does get included as a first line of a state (it shouldn't)
-6. make an asynchronous verion? async generators have different attrs i.e. gi_frame is ag_frame
- - maybe make a preprocessor to rewrite some of the functions in Generator for ease of development
-   
-   also consider coroutines e.g. cr_code, cr_frame, etc.
 """
 class Generator(object):
     """
@@ -1001,6 +991,7 @@ if (3,5) <= version_info:
     skip.__annotations__={"iter_val":Iterable,"n":int,"return":None}
     is_alternative_statement.__annotations__={"line":str,"return":bool}
     ## code adjustments ##
+    skip_alternative_statements.__annotations__={"line_iter":Iterable,"return":tuple[int,str,int]}
     control_flow_adjust.__annotations__={"lines":list[str],"indexes":list[int],"return":tuple[bool,list[str],list[int]]}
     indent_lines.__annotations__={"lines":list[str],"indent":int,"return":list[str]}
     temporary_loop_adjust.__annotations__={"line":str,"indexes":list[int],"outer_loop":list[str],"pos":tuple,"return":tuple[list[str],list[int]]}
