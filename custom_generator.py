@@ -928,6 +928,9 @@ class Generator(Pickler):
             except StopIteration:
                 break
 
+    _attrs=('_source_lines','gi_code','gi_frame','gi_running',
+            'gi_suspended','gi_yieldfrom','jump_positions','lineno','source')
+
     def __init__(self,FUNC,overwrite=False):
         """
         Takes in a function or its source code as the first arguement
@@ -941,8 +944,7 @@ class Generator(Pickler):
         ## dict ##
         if isinstance(FUNC,dict):
             ## will adjust attrs later. Still have to see what's going to be used first ##
-            for attr in ('_source_lines','gi_code','gi_frame','gi_running','gi_suspended',
-                         'gi_yieldfrom','jump_positions','lineno','source'):
+            for attr in self._attrs:
                 setattr(self,attr,FUNC[attr])
         ## running generator ##
         elif hasattr(FUNC,"gi_code"):
@@ -1074,10 +1076,6 @@ class Generator(Pickler):
         current state e.g. only from what has been
         """
         raise exception
-
-
-    _attrs=('_source_lines','gi_code','gi_frame','gi_running',
-            'gi_suspended','gi_yieldfrom','jump_positions','lineno','source')
 
     ## type checking for later ##
 
