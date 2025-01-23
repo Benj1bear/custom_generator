@@ -51,16 +51,6 @@ if version_info < (2,6):
                 return args[0]
         return iter_val.next()
 
-class frame(object):
-    """acts as the initial FrameType"""
-    f_locals={".send":None}
-    f_lineno=0
-
-    def __init__(self,frame=None):
-        if frame:
-            for attr in dir(frame):
-                if not attr.startswith("_"):
-                    setattr(self,attr,getattr(frame,attr))
 ################
 ### tracking ###
 ################
@@ -589,6 +579,85 @@ def extract_lambda(source_code):
     ## in case of a current match ending ##
     if is_lambda:
         yield source
+########################
+### pickling/copying ###
+########################
+class Pickler(object):
+    """class for allowing general copying and pickling of some otherwise uncopyable or unpicklable objects"""
+    _not_allowed=tuple()
+    def _copier(self,FUNC):
+        """copying will create a new generator object but the copier will determine it's depth"""
+        items=((attr,FUNC(getattr(self,attr))) for attr in self._attrs if hasattr(self,attr))
+        return type(self)(dict(items))
+    ## for copying ##
+    def __copy__(self):
+        return self._copier(copy)
+
+    def __deepcopy__(self,memo):
+        return self._copier(deepcopy)
+    ## for pickling ##
+    def __getstate__(self):
+        """Serializing pickle (what object you want serialized)"""
+        return dict((attr,getattr(self,attr)) for attr in self._attrs 
+                    if hasattr(self,attr) and not attr in self._not_allowed)
+
+    def __setstate__(self,state):
+        """Deserializing pickle (returns an instance of the object with state)"""
+        for key,value in state.items():
+            setattr(self,key,value)
+
+class frame(Pickler):
+    """
+    acts as the initial FrameType
+    
+    Note: on pickling ensure f_locals can be pickled
+    """
+    _attrs=('f_back','f_code','f_lasti','f_lineno','f_locals',
+            'f_trace','f_trace_lines','f_trace_opcodes')
+    _not_allowed=("f_globals")
+    f_locals={".send":None}
+    f_lineno=0
+    f_globals=globals()
+    f_builtins=__builtins__
+
+    def __init__(self,frame=None):
+        if frame:
+            if hasattr(frame,"f_back"): ## make sure all other frames are the custom type as well ##
+                self.f_back=type(self)(frame.f_back)
+            if hasattr(frame,"f_code"): ## make sure it can be pickled
+                self.f_code=code(frame.f_code)
+            for attr in self._attrs[2:]:
+                setattr(self,attr,getattr(frame,attr))
+    
+    def clear(self):
+        """clears f_locals e.g. 'most references held by the frame'"""
+        self.f_locals={}
+    
+    ## we have to implement this if I'm going to go 'if frame:' (i.e. in frame.__init__) ##
+    def __bool__(self):
+        """Used on i.e. if frame:"""
+        for attr in ('f_code','f_lasti','f_lineno','f_locals'):
+            if not hasattr(self,attr):
+                return False
+        return True
+
+class code(Pickler):
+    """For pickling and copying code objects"""
+
+    _attrs=code_attrs()
+
+    def __init__(self,code_obj=None):
+        if code_obj:
+            for attr in self._attrs:
+                setattr(self,attr,getattr(code_obj,attr))
+
+    def __bool__(self):
+        """Used on i.e. if frame:"""
+        for attr in self._attrs:
+            if not hasattr(self,attr):
+                return False
+        return True
+                
 #################
 ### Generator ###
 #################
@@ -620,7 +689,7 @@ need to test what happens when there are no lines e.g. empty lines or no state /
  - add type checking and other methods that could be useful to users reasonable for generator functions
  - finish write up of documentation
 """
-class Generator(object):
+class Generator(Pickler):
     """
     Converts a generator function into a generator 
     function that is copyable (e.g. shallow and deepcopy) 
@@ -687,7 +756,7 @@ class Generator(object):
                     ## close the generator then return ##
                     [indent+"currentframe().f_back.f_locals['self'].close()",line]
                 ## handles the .send method ##
-                flag,adjustment=send_adjust(line)
+                flag,adjustment=send_adjust(temp_line)
                 if flag:
                     if flag==2:
                         ## 5: to get past the 'yield'
@@ -840,8 +909,9 @@ class Generator(object):
     init="""def next_state():
     locals().update(currentframe().f_back.f_locals['self'].gi_frame.f_locals)
     currentframe().f_back.f_locals['self'].gi_frame=currentframe()
-    ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(currentframe().f_back), ctypes.c_int(0))"""
-    init_len=init.count("\n")+1
+    ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(currentframe().f_back), ctypes.c_int(0))
+"""
+    init_len=init.count("\n")
 
     def init_states(self):
         """
@@ -871,10 +941,9 @@ class Generator(object):
         ## dict ##
         if isinstance(FUNC,dict):
             ## will adjust attrs later. Still have to see what's going to be used first ##
-            for attr in ("source","gi_code","gi_frame","gi_running","gi_suspended","gi_yieldfrom",
-                         "_source_lines","lineno","state"):
+            for attr in ('_source_lines','gi_code','gi_frame','gi_running','gi_suspended',
+                         'gi_yieldfrom','jump_positions','lineno','source'):
                 setattr(self,attr,FUNC[attr])
-            return
         ## running generator ##
         elif hasattr(FUNC,"gi_code"):
             if FUNC.gi_code.co_name=="<genexpr>": ## co_name is readonly e.g. can't be changed by user ##
@@ -897,27 +966,27 @@ class Generator(object):
                 the ';' when cleaning source lines potentially
                 """
                 self.lineno=FUNC.gi_frame.f_lineno ## is incorrect but needs figuring out ##
-            self.gi_code=FUNC.gi_code
+            self.gi_code=code(FUNC.gi_code)
             ## 'gi_yieldfrom' was introduced in python version 3.5 and yield from ... in 3.3 ##
             if hasattr(FUNC,"gi_yieldfrom"):
                 self.gi_yieldfrom=FUNC.gi_yieldfrom
             else:
                 self.gi_yieldfrom=None
             self.gi_suspended=True
-            self.gi_frame=FUNC.gi_frame
+            self.gi_frame=frame(FUNC.gi_frame)
         ## uninitialized generator ##
         else:
             ## source code string ##
             if isinstance(FUNC,str):
                 self.source=FUNC
-                self.gi_code=compile(FUNC,"","eval")
+                self.gi_code=code(compile(FUNC,"","eval"))
             ## generator function ##
             elif isinstance(FUNC,FunctionType):
                 if FUNC.__code__.co_name=="<lambda>":
                     self.source=expr_getsource(FUNC)
                 else:
                     self.source=getsource(FUNC)
-                self.gi_code=FUNC.__code__
+                self.gi_code=code(FUNC.__code__)
             else:
                 raise TypeError("type '%s' is an invalid initializer for a Generator" % type(FUNC))
             ## make sure the source code is standardized and usable by this generator ##
@@ -972,10 +1041,13 @@ class Generator(object):
         exec(self.init+self.state,globals(),locals())
         self.gi_running=True
         ## if an error does occur it will be formatted correctly in cpython (just incorrect frame and line number) ##
-        result=locals()["next_state"]()
-        self.gi_running=False
-        ## update the line position ##
-        self.lineno=self.linetable[self.gi_frame.f_lineno-self.init_len]
+        try:
+            result=locals()["next_state"]()
+        finally:
+            ## update the line position and frame ##
+            self.gi_running=False
+            self.lineno=self.linetable[self.gi_frame.f_lineno-self.init_len]
+            self.gi_frame=frame(self.gi_frame)
         return result
 
     def send(self,arg):
@@ -1003,32 +1075,9 @@ class Generator(object):
         """
         raise exception
 
-    def _copier(self,FUNC):
-        """copying will create a new generator object but the copier will determine it's depth"""
-        attrs=dict(
-            zip(
-                ((attr,FUNC(getattr(self,attr))) for attr in \
-                        ("source","_source_lines","gi_code","gi_frame","gi_running",
-                         "gi_suspended","gi_yieldfrom","state","state_index","lineno",
-                         "end_lineno","reciever","state_generator"))
-                )
-            )
-        return Generator(attrs)
-    ## for copying ##
-    def __copy__(self):
-        return self._copier(copy)
-    def __deepcopy__(self,memo):
-        return self._copier(deepcopy)
-    ## for pickling ##
-    def __getstate__(self):
-        """Serializing pickle (what object you want serialized)"""
-        _attrs=("source","pos","_states","gi_code","gi_frame","gi_running",
-                "gi_suspended","gi_yieldfrom","state_generator","state","reciever")
-        return dict(zip(_attrs,(getattr(self,attr) for attr in _attrs)))
 
-    def __setstate__(self,state):
-        """Deserializing pickle (returns an instance of the object with state)"""
-        Generator(state)
+    _attrs=('_source_lines','gi_code','gi_frame','gi_running',
+            'gi_suspended','gi_yieldfrom','jump_positions','lineno','source')
 
     ## type checking for later ##
 
@@ -1042,8 +1091,6 @@ class Generator(object):
 if (3,5) <= version_info:
     from typing import Callable,Any,NoReturn,Iterable,Generator as builtin_Generator,AsyncGenerator,Coroutine
     from types import CodeType,FrameType
-    ### utility functions ###
-    frame.__init__.__annotations__={"frame":FrameType|None,"return":None}
     ## tracking ##
     track_iter.__annotations__={"obj":object,"return":Iterable}
     untrack_iters.__annotations__={"return":None}
@@ -1074,6 +1121,16 @@ if (3,5) <= version_info:
     unpack_genexpr.__annotations__={"source":str,"return":list[str]}
     ## lambda ##
     extract_lambda.__annotations__={"source_code":str,"return":builtin_Generator}
+    ### utility functions ###
+    Pickler.__copy__.__annotations__={"return":Pickler}
+    Pickler.__deepcopy__.__annotations__={"memo":dict,"return":Pickler}
+    Pickler.__getstate__.__annotations__={"return":dict}
+    Pickler.__setstate__.__annotations__={"state":dict,"return":None}
+    frame.__init__.__annotations__={"frame":FrameType|None,"return":None}
+    frame.clear.__annotations__={"return":None}
+    frame.__bool__.__annotations__={"return":bool}
+    code.__init__.__annotations__={"code":CodeType|None,"return":None}
+    code.__bool__.__annotations__={"return":bool}
     ### Generator ###
     Generator._custom_adjustment.__annotations__={"line":str,"lineno":int,"return":list[str]}
     Generator._clean_source_lines.__annotations__={"return":list[str]}
