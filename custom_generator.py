@@ -610,7 +610,8 @@ class frame(Pickler):
     """
     acts as the initial FrameType
     
-    Note: on pickling ensure f_locals can be pickled
+    Note: on pickling ensure f_locals 
+    and f_back can be pickled
     """
     _attrs=('f_back','f_code','f_lasti','f_lineno','f_locals',
             'f_trace','f_trace_lines','f_trace_opcodes')
@@ -666,6 +667,8 @@ TODO:
 
 general testing to make sure everything works before any more changes are made
 
+0. fix for closure variables and the linenos, also consider storing the lineno as the gi_frame.f_lineno
+
 1. format errors - maybe edit or add to the exception traceback in __next__ so that the file and line number are correct
                  - with throw, extract the first line from self.state (for cpython) and then create an exception traceback out of that
                    (if wanting to port onto jupyter notebook you'd use the entire self._source_lines and then point to the lineno)
@@ -682,12 +685,6 @@ need to test what happens when there are no lines e.g. empty lines or no state /
  - use getcode and getframe for more generalizability
    also consider coroutines e.g. cr_code, cr_frame, etc.
 
----------
-- other -
----------
- - use ctypes.pythonapi.PyLocals_to_Fast on the frame if needed
- - add type checking and other methods that could be useful to users reasonable for generator functions
- - finish write up of documentation
 """
 class Generator(Pickler):
     """
@@ -793,18 +790,19 @@ class Generator(Pickler):
         self.jump_positions,self._jump_stack,self._skip_indent,lineno=[],[],0,0
         ## setup source as an iterator and making sure the first indentation's correct ##
         source=skip_source_definition(self.source)
-        source=enumerate(source[get_indent(source):])
+        source=source[get_indent(source):] ## we need to make sure the source is saved for skipping for line continuations ##
+        source_iter=enumerate(source)
         line,lines,indented,space,indentation,prev=" "*4,[],False,0,4,(0,0,"")
         ## enumerate since I want the loop to use an iterator but the 
         ## index is needed to retain it for when it's used on get_indent
-        for index,char in source:
+        for index,char in source_iter:
             ## collect strings ##
             if char=="'" or char=='"':
                 if prev[0]+2==prev[1]+1==index and prev[2]==char:
                     string_collector=collect_multiline_string
                 else:
                     string_collector=collect_string
-                temp_index,temp_line=string_collector(source,char)
+                temp_index,temp_line=string_collector(source_iter,char)
                 prev=(index,temp_index,char)
                 line+=temp_line
             ## makes the line singly spaced while retaining the indentation ##
@@ -819,13 +817,13 @@ class Generator(Pickler):
                 space=index
             ## join everything after the line continuation until the next \n or ; ##
             elif char=="\\":
-                skip(source,get_indent(self.source[index+1:])) ## +1 since 'index:' is inclusive ##
+                skip(source_iter,get_indent(source[index+1:])) ## +1 since 'index:' is inclusive ##
             ## create new line ##
             elif char in "\n;:":
                 ## make sure to include it ##
                 if char==":":
+                    indentation=get_indent(line)+4 # in case of ';'
                     line+=char
-                    indentation=get_indent(line) # in case of ';'
                 if not line.isspace(): ## empty lines are possible ##
                     if self._jump_stack:
                         reference_indent=get_indent(line)
@@ -834,23 +832,20 @@ class Generator(Pickler):
                     lineno+=1
                     lines+=self._custom_adjustment(line,lineno)
                 ## start a new line ##
-                if char == ";":
+                if char in ":;":
                     indented=True # just in case
                     line=" "*indentation
                 else:
-                    space=index
                     indented=False
                     line=""
-                if char in ":;":
-                    ## skip the indents since these are variable ##
-                    skip(source,get_indent(self.source[index+1:]))
+                space=index ## this is important (otherwise we get more indents than necessary) ##
             else:
                 line+=char
         ## in case you get a for loop at the end and you haven't got the end jump_position ##
         ## then you just pop them all off as being the same end_lineno ##
         end_lineno=len(lines)+1
         while self._jump_stack:
-            self.jump_positions[self._jump_stack.pop()[1]][1]=end_lineno            
+            self.jump_positions[self._jump_stack.pop()[1]][1]=end_lineno
         ## are not used by this generator (was only for formatting source code and 
         ## recording the jump positions needed in the for loop adjustments) ##
         del self._jump_stack,self._skip_indent
@@ -922,11 +917,8 @@ class Generator(Pickler):
         """
         ## since self.state starts as 'None' ##
         yield self._create_state()
-        while self.state:
-            try:
-                yield self._create_state()
-            except StopIteration:
-                break
+        while self.state and len(self.linetable) > 1:
+            yield self._create_state()
 
     _attrs=('_source_lines','gi_code','gi_frame','gi_running',
             'gi_suspended','gi_yieldfrom','jump_positions','lineno','source')
@@ -943,7 +935,6 @@ class Generator(Pickler):
         """
         ## dict ##
         if isinstance(FUNC,dict):
-            ## will adjust attrs later. Still have to see what's going to be used first ##
             for attr in self._attrs:
                 setattr(self,attr,FUNC[attr])
         ## running generator ##
@@ -1044,13 +1035,14 @@ class Generator(Pickler):
         self.gi_running=True
         ## if an error does occur it will be formatted correctly in cpython (just incorrect frame and line number) ##
         try:
-            result=locals()["next_state"]()
+            return locals()["next_state"]()
         finally:
             ## update the line position and frame ##
             self.gi_running=False
-            self.lineno=self.linetable[self.gi_frame.f_lineno-self.init_len]
+            self.gi_frame.f_locals[".send"]=None
             self.gi_frame=frame(self.gi_frame)
-        return result
+            if len(self.linetable) > 1:
+                self.lineno=self.linetable[self.gi_frame.f_lineno-self.init_len]
 
     def send(self,arg):
         """
@@ -1059,8 +1051,7 @@ class Generator(Pickler):
         """
         if not self.gi_running:
             raise TypeError("can't send non-None value to a just-started generator")
-        if self.reciever:
-            self.gi_frame.f_locals()[".send"]=arg
+        self.gi_frame.f_locals()[".send"]=arg
         return next(self)
 
     def close(self):
@@ -1076,6 +1067,10 @@ class Generator(Pickler):
         current state e.g. only from what has been
         """
         raise exception
+
+    def __setstate__(self,state):
+        super().__setstate__(state)
+        self.state_generator=self.init_states()
 
     ## type checking for later ##
 
