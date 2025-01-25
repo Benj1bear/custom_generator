@@ -190,6 +190,12 @@ else:
     def is_alternative_statement(line):
         return line.startswith("elif") or line.startswith("else") or line.startswith("case") or line.startswith("default")
 is_alternative_statement.__doc__="Checks if a line is an alternative statement"
+
+def is_definition(line):
+    """Checks if a line is a definition"""
+    return line.startswith("def ") or line.startswith("async def ") or\
+           line.startswith("class ") or line.startswith("async class ")
+
 ########################
 ### code adjustments ###
 ########################
@@ -733,38 +739,34 @@ class Generator(Pickler):
         4. tend to all yield from ... with the same for loop variation
         """
         number_of_indents=get_indent(line)
-        if self._skip_indent <= number_of_indents: ## skips if greater to avoid definitions ##
-            temp_line=line[number_of_indents:]
-            if temp_line.startswith("def ") or temp_line.startswith("async def ") or temp_line.startswith("class ") or temp_line.startswith("async class "):
-                self._skip_indent=number_of_indents
+        temp_line=line[number_of_indents:]
+        indent=" "*number_of_indents
+        if temp_line.startswith("yield from "):
+            return [indent+"currentframe().f_back.f_locals['.yieldfrom']="+temp_line[11:],
+                    indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
+                    indent+"    return currentframe().f_back.f_locals['.i']"]
+        if temp_line.startswith("yield "):
+            return [indent+"return"+temp_line[5:]] ## 5 to retain the whitespace ##
+        if temp_line.startswith("for ") or temp_line.startswith("while "):
+            self.jump_positions+=[[lineno,None]] ## has to be a list since we're assigning ##
+            self._jump_stack+=[(number_of_indents,len(self.jump_positions)-1)] ## doesn't have to be a list since it'll get popped e.g. it's not really meant to be modified as is ##
+            return [line]
+        if temp_line.startswith("return "):
+            ## close the generator then return ##
+            return [indent+"currentframe().f_back.f_locals['self'].close()",line]
+        ## handles the .send method ##
+        flag,adjustment=send_adjust(temp_line)
+        if flag:
+            if flag==2:
+                ## 5: to get past the 'yield'
+                return [indent+"return"+adjustment[0][5:],
+                        indent+adjustment[1]]
             else:
-                self._skip_indent=0
-                indent=" "*number_of_indents
-                if temp_line.startswith("yield from "):
-                    return [indent+"currentframe().f_back.f_locals['.yieldfrom']="+temp_line[11:],
-                            indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
-                            indent+"    return currentframe().f_back.f_locals['.i']"]
-                elif temp_line.startswith("yield "):
-                    return [indent+"return"+temp_line[5:]] ## 5 to retain the whitespace ##
-                elif temp_line.startswith("for ") or temp_line.startswith("while "):
-                    self.jump_positions+=[(lineno,None)]
-                    self._jump_stack+=[(number_of_indents,len(self.jump_positions)-1)]
-                elif temp_line.startswith("return "):
-                    ## close the generator then return ##
-                    [indent+"currentframe().f_back.f_locals['self'].close()",line]
-                ## handles the .send method ##
-                flag,adjustment=send_adjust(temp_line)
-                if flag:
-                    if flag==2:
-                        ## 5: to get past the 'yield'
-                        return [indent+"return"+adjustment[0][5:],
-                                indent+adjustment[1]]
-                    else:
-                        ## 11: to get past the 'yield from'
-                        return [indent+"currentframe().f_back.f_locals['.yieldfrom']="+adjustment[0][11:],
-                                indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
-                                indent+"    return currentframe().f_back.f_locals['.i']",
-                                indent+"    %scurrentframe().f_back.f_locals['.yieldfrom'].send(currentframe().f_back.f_locals['.send'])" % adjustment[1]]
+                ## 11: to get past the 'yield from'
+                return [indent+"currentframe().f_back.f_locals['.yieldfrom']="+adjustment[0][11:],
+                        indent+"for currentframe().f_back.f_locals['.i'] in currentframe().f_back.f_locals['.yieldfrom']:",
+                        indent+"    return currentframe().f_back.f_locals['.i']",
+                        indent+"    %scurrentframe().f_back.f_locals['.yieldfrom'].send(currentframe().f_back.f_locals['.send'])" % adjustment[1]]
         return [line]
 
     def _clean_source_lines(self):
@@ -787,7 +789,7 @@ class Generator(Pickler):
         _skip_indent: the indent level of a definition being defined (definitions shouldn't be adjusted)
         """
         ## for loop adjustments ##
-        self.jump_positions,self._jump_stack,self._skip_indent,lineno=[],[],0,0
+        self.jump_positions,self._jump_stack,lineno=[],[],0
         ## setup source as an iterator and making sure the first indentation's correct ##
         source=skip_source_definition(self.source)
         source=source[get_indent(source):] ## we need to make sure the source is saved for skipping for line continuations ##
@@ -825,12 +827,38 @@ class Generator(Pickler):
                     indentation=get_indent(line)+4 # in case of ';'
                     line+=char
                 if not line.isspace(): ## empty lines are possible ##
+                    reference_indent=get_indent(line)
                     if self._jump_stack:
-                        reference_indent=get_indent(line)
                         while self._jump_stack and reference_indent <= self._jump_stack[-1][0]: # -1: top of stack, 0: start lineno
                             self.jump_positions[self._jump_stack.pop()[1]][1]=len(lines)+1 ## +1 assuming exclusion slicing on the stop index ##
-                    lineno+=1
-                    lines+=self._custom_adjustment(line,lineno)
+                    ## skip the definitions ##
+                    if is_definition(line[reference_indent:]):
+                        indent=reference_indent+1
+                        while reference_indent < indent:
+                            ## we're not specific about formatting the definitions ##
+                            ## we just need to make sure to include them ##
+                            for index,char in source_iter:
+                                ## collect strings ##
+                                if char=="'" or char=='"':
+                                    if prev[0]+2==prev[1]+1==index and prev[2]==char:
+                                        string_collector=collect_multiline_string
+                                    else:
+                                        string_collector=collect_string
+                                    temp_index,temp_line=string_collector(source_iter,char)
+                                    prev=(index,temp_index,char)
+                                    line+=temp_line
+                                ## newline ##
+                                elif char == "\n":
+                                    break
+                                else:
+                                    line+=char
+                            ## add the line and get the indentation to check if continuing ##
+                            lineno+=1
+                            lines+=[line]
+                            line,indent="",get_indent(source[index+1:])
+                    else:
+                        lineno+=1
+                        lines+=self._custom_adjustment(line,lineno)
                 ## start a new line ##
                 if char in ":;":
                     indented=True # just in case
@@ -848,7 +876,7 @@ class Generator(Pickler):
             self.jump_positions[self._jump_stack.pop()[1]][1]=end_lineno
         ## are not used by this generator (was only for formatting source code and 
         ## recording the jump positions needed in the for loop adjustments) ##
-        del self._jump_stack,self._skip_indent
+        del self._jump_stack
         return lines
 
     def _create_state(self):
@@ -872,9 +900,10 @@ class Generator(Pickler):
         outermost nesting will be the final section that
         also contains the rest of the source lines as well
         """
-        temp_lineno=self.lineno
+        temp_lineno=self.lineno-1 ## for 0 based indexing ##
         loops=get_loops(temp_lineno,self.jump_positions)
         if loops:
+            linetable=[]
             blocks=""
             while loops:
                 start_pos,end_pos=loops.pop()
@@ -896,7 +925,7 @@ class Generator(Pickler):
             return
         ## doesn't need a reference indent since no loops therefore it'll be set to 4 automatically ##
         indexes=list(range(temp_lineno,len(self._source_lines)))
-        flag,block,indexes=control_flow_adjust(self._source_lines[temp_lineno:],indexes)
+        flag,block,indexes=control_flow_adjust(self._source_lines[temp_lineno:],indexes) ## -1 for 0 based indexing
         self.state="\n".join(block)
         self.linetable=indexes
 
@@ -988,7 +1017,7 @@ class Generator(Pickler):
             self.gi_frame=frame()
             self.gi_suspended=False
             self.gi_yieldfrom=None
-            self.lineno=0 ## modified every time __next__ is called ##
+            self.lineno=1 ## modified every time __next__ is called; always start at line 1 ##
         self.gi_running=False
         self.state=None
         self.state_generator=self.init_states()
@@ -1042,7 +1071,7 @@ class Generator(Pickler):
             self.gi_frame.f_locals[".send"]=None
             self.gi_frame=frame(self.gi_frame)
             if len(self.linetable) > 1:
-                self.lineno=self.linetable[self.gi_frame.f_lineno-self.init_len]
+                self.lineno=self.linetable[self.gi_frame.f_lineno-self.init_len]+1 ## +1 to get the next lineno after returning ##
 
     def send(self,arg):
         """
