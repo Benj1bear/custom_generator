@@ -150,7 +150,7 @@ def collect_multiline_string(iter_val,reference):
     if a string starts with 3 qoutations
     then it's classed as a multistring
     """
-    line,backslash,end_reference,prev,count=reference,False,reference*3,-2,0
+    line,backslash,prev,count=reference,False,-2,0
     for index,char in iter_val:
         if char==reference and not backslash:
             if index-prev==1:
@@ -166,6 +166,33 @@ def collect_multiline_string(iter_val,reference):
         if char=="\\":
             backslash=True
     return index,line
+
+def collect_definition(line,lines,lineno,source,source_iter,reference_indent):
+    """Collects definitions from source"""
+    indent=reference_indent+1
+    while reference_indent < indent:
+        ## we're not specific about formatting the definitions ##
+        ## we just need to make sure to include them ##
+        for index,char in source_iter:
+            ## collect strings ##
+            if char=="'" or char=='"':
+                if prev[0]+2==prev[1]+1==index and prev[2]==char:
+                    string_collector=collect_multiline_string
+                else:
+                    string_collector=collect_string
+                temp_index,temp_line=string_collector(source_iter,char)
+                prev=(index,temp_index,char)
+                line+=temp_line
+            ## newline ##
+            elif char == "\n":
+                break
+            else:
+                line+=char
+        ## add the line and get the indentation to check if continuing ##
+        lineno+=1
+        lines+=[line]
+        line,indent="",get_indent(source[index+1:])
+    return lineno,lines
 
 def get_indent(line):
     """Gets the number of spaces used in an indentation"""
@@ -833,29 +860,7 @@ class Generator(Pickler):
                             self.jump_positions[self._jump_stack.pop()[1]][1]=len(lines)+1 ## +1 assuming exclusion slicing on the stop index ##
                     ## skip the definitions ##
                     if is_definition(line[reference_indent:]):
-                        indent=reference_indent+1
-                        while reference_indent < indent:
-                            ## we're not specific about formatting the definitions ##
-                            ## we just need to make sure to include them ##
-                            for index,char in source_iter:
-                                ## collect strings ##
-                                if char=="'" or char=='"':
-                                    if prev[0]+2==prev[1]+1==index and prev[2]==char:
-                                        string_collector=collect_multiline_string
-                                    else:
-                                        string_collector=collect_string
-                                    temp_index,temp_line=string_collector(source_iter,char)
-                                    prev=(index,temp_index,char)
-                                    line+=temp_line
-                                ## newline ##
-                                elif char == "\n":
-                                    break
-                                else:
-                                    line+=char
-                            ## add the line and get the indentation to check if continuing ##
-                            lineno+=1
-                            lines+=[line]
-                            line,indent="",get_indent(source[index+1:])
+                        lineno,lines=collect_definition(line,lines,lineno,source,source_iter,reference_indent)
                     else:
                         lineno+=1
                         lines+=self._custom_adjustment(line,lineno)
@@ -925,7 +930,7 @@ class Generator(Pickler):
             return
         ## doesn't need a reference indent since no loops therefore it'll be set to 4 automatically ##
         indexes=list(range(temp_lineno,len(self._source_lines)))
-        flag,block,indexes=control_flow_adjust(self._source_lines[temp_lineno:],indexes) ## -1 for 0 based indexing
+        flag,block,indexes=control_flow_adjust(self._source_lines[temp_lineno:],indexes)
         self.state="\n".join(block)
         self.linetable=indexes
 
