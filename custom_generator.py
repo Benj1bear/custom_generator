@@ -167,7 +167,7 @@ def collect_multiline_string(iter_val,reference):
             backslash=True
     return index,line
 
-def collect_definition(line,lines,lineno,source,source_iter,reference_indent):
+def collect_definition(index,line,lines,lineno,source,source_iter,reference_indent,prev):
     """Collects definitions from source"""
     indent=reference_indent+1
     while reference_indent < indent:
@@ -192,7 +192,8 @@ def collect_definition(line,lines,lineno,source,source_iter,reference_indent):
         lineno+=1
         lines+=[line]
         line,indent="",get_indent(source[index+1:])
-    return lineno,lines
+    ## make sure to return the index and char for the indentation ##
+    return index,char,lineno,lines
 
 def get_indent(line):
     """Gets the number of spaces used in an indentation"""
@@ -860,17 +861,17 @@ class Generator(Pickler):
                             self.jump_positions[self._jump_stack.pop()[1]][1]=len(lines)+1 ## +1 assuming exclusion slicing on the stop index ##
                     ## skip the definitions ##
                     if is_definition(line[reference_indent:]):
-                        lineno,lines=collect_definition(line,lines,lineno,source,source_iter,reference_indent)
+                        index,char,lineno,lines=collect_definition(index,line,lines,lineno,source,source_iter,reference_indent,prev)
                     else:
                         lineno+=1
                         lines+=self._custom_adjustment(line,lineno)
+                    print(line)
                 ## start a new line ##
                 if char in ":;":
-                    indented=True # just in case
-                    line=" "*indentation
+                    # just in case
+                    indented,line=True," "*indentation
                 else:
-                    indented=False
-                    line=""
+                    indented,line=False,""
                 space=index ## this is important (otherwise we get more indents than necessary) ##
             else:
                 line+=char
