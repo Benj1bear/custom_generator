@@ -167,7 +167,7 @@ def collect_multiline_string(iter_val,reference):
             backslash=True
     return index,line
 
-def collect_definition(index,line,lines,lineno,source,source_iter,reference_indent,prev):
+def collect_definition(line,lines,lineno,source,source_iter,reference_indent,prev):
     """Collects definitions from source"""
     indent=reference_indent+1
     while reference_indent < indent:
@@ -861,7 +861,7 @@ class Generator(Pickler):
                             self.jump_positions[self._jump_stack.pop()[1]][1]=len(lines)+1 ## +1 assuming exclusion slicing on the stop index ##
                     ## skip the definitions ##
                     if is_definition(line[reference_indent:]):
-                        index,char,lineno,lines=collect_definition(index,line,lines,lineno,source,source_iter,reference_indent,prev)
+                        index,char,lineno,lines=collect_definition(line,lines,lineno,source,source_iter,reference_indent,prev)
                     else:
                         lineno+=1
                         lines+=self._custom_adjustment(line,lineno)
